@@ -13,6 +13,6 @@ dependencies = [
     "pyvmomi>=9.1.0.0",
     "requests==2.33.0",
     "rich>=15.0.0",
-    "urllib3==2.7.0",
+    "urllib3==2.8.0",
     "wcwidth==0.2.6",
 ]
