@@ -5,7 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "certifi==2024.7.4",
+    "certifi==2026.10.19",
     "charset-normalizer==3.1.0",
     "idna==3.15",
     "prettytable==3.8.0",
