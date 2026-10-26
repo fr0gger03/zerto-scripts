@@ -223,6 +223,38 @@ these can cause the eventual VM to fail to power on with an error like
 `Cannot open the disk '...' or one of the snapshot disks it depends on.`
 See [Broadcom KB 334555](https://knowledge.broadcom.com/external/article/334555/unable-to-power-on-vm-when-iofilters-is.html).
 
+``` bash
+# Example disk descriptor file containing references to hepreplicationfilter
+
+cat /vmfs/volumes/consolidated-sandbox-cl01-ds-vsan01/ubuntu01-src.yellow.set.lab/ub
+untu01-src.yellow.set.lab.vmdk 
+
+# Disk DescriptorFile
+version=5
+encoding="UTF-8"
+CID=fffffffe
+parentCID=ffffffff
+createType="vmfs"
+# Extent description
+RW 104857600 VMFS "vsan://522575f1cd03a467-4c173d347cbd724c/ce847f6a-aa67-4210-2c4d-0c42a1ed6c18"
+# The Disk Data Base 
+#DDB
+ddb.adapterType = "buslogic"
+ddb.deletable = "true"
+ddb.geometry.cylinders = "6527"
+ddb.geometry.heads = "255"
+ddb.geometry.sectors = "63"
+# ********** Note the presence of hpereplication ************
+ddb.iofilters = "hpereplication"
+ddb.longContentID = "fee616dd47a9c48c76eae093fffffffe"
+# ********** Note the dependency for the sidecar files ************
+ddb.sidecars = "hpereplication_2,ubuntu01-src.yellow.set.lab-b7276352f854ae50.vmfd;hpereplication_1,ubuntu01-src.yellow.set.lab-2cb493a4ea28a9a0.vmfd"
+ddb.uuid = "60 00 C2 9c 2b 8f 65 f2-ea d3 24 68 6e be e4 81"
+ddb.virtualHWVersion = "14"
+
+
+```
+
 Run Script 3 after Script 2 has finished copying. It reads the same migration JSON
 and only processes disks marked `copied`; pending, skipped, and failed disks are
 excluded. It does not fall back to the full discovery manifest if selection is missing:
