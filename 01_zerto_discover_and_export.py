@@ -104,6 +104,19 @@ def print_assessment(report: dict, units: str) -> None:
     def size(value):
         return "UNKNOWN" if value is None else f"{value / divisor:,.2f}"
 
+    disks = Table(title=f"Replica and journal VMDKs ({units})", header_style="bold magenta")
+    for label in ("VPG", "VM", "Type", "Current VMDK path"):
+        disks.add_column(label, overflow="fold")
+    disks.add_column("Used / prov.", justify="right", overflow="fold")
+    disks.add_column("Attribution", overflow="fold")
+    for row in report.get("volume_details", []):
+        disks.add_row(
+            row["vpg_name"], row["vm_name"], row["volume_type"],
+            row["vmdk_path"] or row["vmdk_filename"] or "UNKNOWN",
+            f"{size(row['used_bytes'])} / {size(row['provisioned_bytes'])}",
+            row["attribution_status"],
+        )
+    console.print(disks)
 
     for group, title in (("vms", "Per-VM seed assessment"), ("vpgs", "Per-VPG seed assessment")):
         table = Table(title=f"{title} ({units})", header_style="bold magenta")
@@ -156,7 +169,7 @@ def main():
     finally:
         client.close()
     report = assess(vms_data, volumes_data, args.threshold)
-    report.update({"schema_version": 1, "collection_started_at": started_at,
+    report.update({"schema_version": 2, "collection_started_at": started_at,
                    "collection_finished_at": datetime.now(timezone.utc).isoformat(),
                    "threshold_percent": args.threshold, "byte_units": "bytes",
                    "ratio_basis": "journal_used_bytes / replica_used_bytes * 100",

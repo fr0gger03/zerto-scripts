@@ -135,9 +135,56 @@ class AssessmentTests(unittest.TestCase):
             self.assertIn(expected, output.getvalue())
             self.assertIn(units, output.getvalue())
 
+    def test_disk_details_reconcile_with_vm_totals(self):
+        volumes = [vol(2, 10, path="[DS] journals/one.vmdk"),
+                   vol(2, 20, path="[DS] journals/two.vmdk"),
+                   vol(1, 100, path="[DS] replicas/base.vmdk"),
+                   vol(0, 200), vol("Scratch", 300)]
+        report = assess([vm()], volumes, 30)
+        disks = report["volume_details"]
+        self.assertEqual(len(disks), 3)
+        self.assertEqual(disks[0]["volume_type"], "replica")
+        self.assertEqual(disks[0]["vmdk_path"], "[DS] replicas/base.vmdk")
+        self.assertEqual(disks[0]["vm_name"], "VM")
+        self.assertTrue(all(d["included_in_totals"] for d in disks))
+        for kind in ("journal", "replica"):
+            for metric in ("used", "provisioned"):
+                self.assertEqual(
+                    sum(d[f"{metric}_bytes"] for d in disks if d["volume_type"] == kind),
+                    report["vms"][0][f"{kind}_{metric}_bytes"],
+                )
 
+    def test_duplicate_and_orphan_disks_remain_visible(self):
+        journal = vol(2, path="[DS] journal.vmdk")
+        report = assess([vm()], [journal, journal, vol(1, 100),
+                        vol(2, identifier="orphan", path="[DS] orphan.vmdk")], 30)
+        self.assertEqual(len(report["volume_details"]), 4)
+        excluded = [d for d in report["volume_details"] if not d["included_in_totals"]]
+        self.assertEqual({d["attribution_status"] for d in excluded}, {"duplicate", "unassigned"})
+        self.assertEqual(report["vms"][0]["journal_used_bytes"], 30)
 
+    def test_disk_details_preserve_unknown_sizes_and_missing_paths(self):
+        disk = {"VOLUMETYPE": 2, "PROTECTEDVM": {"IDENTIFIER": "vm-1"},
+                "SIZE": {"USEDINBYTES": None, "PROVISIONEDINBYTES": "1024"}}
+        row = assess([vm()], [disk], 30)["volume_details"][0]
+        self.assertIsNone(row["vmdk_path"])
+        self.assertIsNone(row["used_bytes"])
+        self.assertEqual(row["provisioned_bytes"], 1024)
+        self.assertEqual(row["vm_identifier"], "vm-1")
 
+    def test_disk_table_keeps_full_paths_on_narrow_terminal(self):
+        path = "[DS] folder/replica.vmdk"
+        report = assess([vm()], [vol(2, path="[DS] journal.vmdk"), vol(1, 100, path=path)], 30)
+        report["threshold_percent"] = 30
+        output = io.StringIO()
+        with patch.object(discovery, "console", Console(file=output, width=100)):
+            discovery.print_assessment(report, "MiB")
+        rendered = output.getvalue()
+        self.assertIn("Replica and journal VMDKs (MiB)", rendered)
+        # Wrapping can split paths, but must not replace path characters with ellipses.
+        self.assertNotIn("…", rendered)
+        self.assertIn("replica.vmdk", rendered)
+        self.assertIn("journal.vmdk", rendered)
 
 
 class ClientTests(unittest.TestCase):
@@ -229,7 +276,9 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(set(disks[0]), {"vm_name", "vpg_name", "datastore", "source_raw_path", "ui_display_path", "destination_seed_path"})
             self.assertEqual(disks[0]["destination_seed_path"], "[DS] VM/disk.vmdk")
             self.assertEqual(report["vms"][0]["recommendation"], "SEED CANDIDATE")
-            self.assertEqual(report["schema_version"], 1)
+            self.assertEqual(report["schema_version"], 2)
+            self.assertEqual(len(report["volume_details"]), 2)
+            self.assertEqual(report["volume_details"][0]["vmdk_path"], "[DS] folder/disk.vmdk")
             self.assertIn("not unique changed bytes", output.getvalue())
             client.close.assert_called_once()
 

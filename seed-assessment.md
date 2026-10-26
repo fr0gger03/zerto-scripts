@@ -7,6 +7,10 @@ start vSphere Replication with a fresh initial sync. Its recommendations are
 ## Reading the report
 
 Script 01 prints per-VM and per-VPG tables alongside the existing disk inventory.
+The **Replica and journal VMDKs** table lists each current disk path, its VM/VPG,
+and its used/provisioned sizes in the selected units. Multiple journal volumes
+appear as separate rows: their sizes add up to the VM's journal totals. These are
+current Zerto disk paths, not the destination paths created by script 02.
 
 | Column | Meaning |
 | --- | --- |
@@ -89,6 +93,14 @@ this change has offline tests, not certification against every Zerto release.
 - `zerto_seeds_manifest.json`: unchanged disk-list format consumed by scripts 02–03.
 - `zerto_seed_assessment.json`: raw byte totals, VM/VPG identifiers, ratios,
   recommendations, data-quality issues, threshold, and UTC collection timestamps.
+  Schema version 2 adds `volume_details`, the disk table as structured JSON rows:
+  VM/VPG identifiers and names, `volume_type` (`replica` or `journal`), datastore,
+  VMDK path/filename, and `used_bytes` / `provisioned_bytes`. The terminal formats
+  these byte values as MiB or GiB. Missing sizes or paths remain null, not zero.
+  `attribution_status` is `matched`, `duplicate`, or `unassigned`;
+  `included_in_totals` identifies the records used in aggregation. Duplicate and
+  unassigned records remain visible for troubleshooting but do not add to totals.
+  A matched disk with a missing byte metric makes that aggregate metric unknown.
 
 `MANIFEST_FILE` and `ASSESSMENT_FILE` override the defaults; `--assessment-file`
 overrides the assessment path. Paths are relative to the working directory.

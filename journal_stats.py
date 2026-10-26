@@ -45,6 +45,31 @@ def recommendation(used: int | None, replica: int | None, threshold: float) -> t
     return ratio, ("FULL SYNC RECOMMENDED" if ratio > threshold else "SEED CANDIDATE")
 
 
+def volume_detail(volume: dict, kind: str) -> dict:
+    """Retain the disk identity and measurements behind the aggregate totals."""
+    protected_vm = get_val(volume, "protectedVm", {})
+    vpg = get_val(volume, "vpg", {})
+    datastore = get_val(volume, "datastore", {})
+    path = get_val(volume, "path", {})
+    size = get_val(volume, "size", {})
+    datastore_name = get_val(datastore, "name")
+    disk_path = get_val(path, "full") or get_val(path, "relative")
+    if disk_path and datastore_name and not disk_path.startswith("["):
+        disk_path = f"[{datastore_name}] {disk_path}"
+    return {
+        "vm_identifier": get_val(protected_vm, "identifier"),
+        "vm_name": get_val(protected_vm, "name") or "Unknown_VM",
+        "vpg_identifier": get_val(vpg, "identifier"),
+        "vpg_name": get_val(vpg, "name") or "Unknown_VPG",
+        "volume_type": "replica" if kind == "recovery" else "journal",
+        "datastore": datastore_name,
+        "vmdk_path": disk_path,
+        "vmdk_filename": get_val(path, "fileName"),
+        "used_bytes": byte_value(get_val(size, "usedInBytes")),
+        "provisioned_bytes": byte_value(get_val(size, "provisionedInBytes")),
+        "included_in_totals": False,
+        "attribution_status": "unassigned",
+    }
 
 
 def assess(vms: list, volumes: list, threshold: float) -> dict:
@@ -73,11 +98,14 @@ def assess(vms: list, volumes: list, threshold: float) -> dict:
         by_vm[row["vm_identifier"]].append(row)
 
     seen = set()
+    volume_details = []
     unassigned = False
     for volume in volumes:
         kind = volume_type(volume)
         if kind not in {"journal", "recovery"}:
             continue
+        detail = volume_detail(volume, kind)
+        volume_details.append(detail)
         # OwningVm can identify a VRA; never use it to attribute journal usage.
         identifier = get_val(get_val(volume, "protectedVm"), "identifier")
         vpg = get_val(volume, "vpg", {})
@@ -97,6 +125,9 @@ def assess(vms: list, volumes: list, threshold: float) -> dict:
             row["vpg_identifier"] = vpg_id
         if row["vpg_name"] == "Unknown_VPG" and vpg_name:
             row["vpg_name"] = vpg_name
+        for field in ("vm_identifier", "vm_name", "vpg_identifier", "vpg_name"):
+            detail[field] = row[field]
+        detail["attribution_status"] = "matched"
         path = get_val(get_val(volume, "path"), "full")
         ds = get_val(volume, "datastore", {})
         # A repeated physical volume must not inflate the assessment.
@@ -104,9 +135,11 @@ def assess(vms: list, volumes: list, threshold: float) -> dict:
                        get_val(ds, "identifier") or get_val(ds, "name"), path)
         if path and fingerprint in seen:
             row["issues"].append("Duplicate volume record; verify API inventory")
+            detail["attribution_status"] = "duplicate"
             continue
         if path:
             seen.add(fingerprint)
+        detail["included_in_totals"] = True
         row["journal" if kind == "journal" else "replica"].append(get_val(volume, "size", {}))
 
     vm_rows = []
@@ -148,4 +181,10 @@ def assess(vms: list, volumes: list, threshold: float) -> dict:
         if row["unknown_vm_count"]:
             row["recommendation"] = "UNKNOWN"
         vpg_rows.append(row)
-    return {"vms": vm_rows, "vpgs": vpg_rows, "warnings": sorted(set(warnings))}
+    volume_details.sort(key=lambda disk: (
+        disk["vpg_name"], disk["vpg_identifier"] or "", disk["vm_name"],
+        disk["vm_identifier"] or "", disk["volume_type"] != "replica",
+        disk["vmdk_path"] or "",
+    ))
+    return {"vms": vm_rows, "vpgs": vpg_rows, "volume_details": volume_details,
+            "warnings": sorted(set(warnings))}
