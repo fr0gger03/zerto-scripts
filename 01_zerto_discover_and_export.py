@@ -82,6 +82,8 @@ def parse_args() -> argparse.Namespace:
                         default=config.get_env("JOURNAL_THRESHOLD_PERCENT", "30"),
                         help="Advisory journal-used / replica-used threshold (default: 30 percent).")
     parser.add_argument("--units", choices=("MiB", "GiB"), default="GiB")
+    parser.add_argument("--show-volume-details", action="store_true",
+                        help="Print the optional replica and journal VMDK table.")
     parser.add_argument("--assessment-file", default=config.get_env("ASSESSMENT_FILE", "zerto_seed_assessment.json"))
     parser.add_argument("--timeout", type=float, default=30, help="HTTP timeout in seconds (default: 30).")
     args = parser.parse_args()
@@ -98,25 +100,26 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def print_assessment(report: dict, units: str) -> None:
+def print_assessment(report: dict, units: str, *, show_volume_details: bool = False) -> None:
     divisor = 1024 ** (2 if units == "MiB" else 3)
 
     def size(value):
         return "UNKNOWN" if value is None else f"{value / divisor:,.2f}"
 
-    disks = Table(title=f"Replica and journal VMDKs ({units})", header_style="bold magenta")
-    for label in ("VPG", "VM", "Type", "Current VMDK path"):
-        disks.add_column(label, overflow="fold")
-    disks.add_column("Used / prov.", justify="right", overflow="fold")
-    disks.add_column("Attribution", overflow="fold")
-    for row in report.get("volume_details", []):
-        disks.add_row(
-            row["vpg_name"], row["vm_name"], row["volume_type"],
-            row["vmdk_path"] or row["vmdk_filename"] or "UNKNOWN",
-            f"{size(row['used_bytes'])} / {size(row['provisioned_bytes'])}",
-            row["attribution_status"],
-        )
-    console.print(disks)
+    if show_volume_details:
+        disks = Table(title=f"Replica and journal VMDKs ({units})", header_style="bold magenta")
+        for label in ("VPG", "VM", "Type", "Current VMDK path"):
+            disks.add_column(label, overflow="fold")
+        disks.add_column("Used / prov.", justify="right", overflow="fold")
+        disks.add_column("Attribution", overflow="fold")
+        for row in report.get("volume_details", []):
+            disks.add_row(
+                row["vpg_name"], row["vm_name"], row["volume_type"],
+                row["vmdk_path"] or row["vmdk_filename"] or "UNKNOWN",
+                f"{size(row['used_bytes'])} / {size(row['provisioned_bytes'])}",
+                row["attribution_status"],
+            )
+        console.print(disks)
 
     for group, title in (("vms", "Per-VM seed assessment"), ("vpgs", "Per-VPG seed assessment")):
         table = Table(title=f"{title} ({units})", header_style="bold magenta")
@@ -174,7 +177,7 @@ def main():
                    "threshold_percent": args.threshold, "byte_units": "bytes",
                    "ratio_basis": "journal_used_bytes / replica_used_bytes * 100",
                    "interpretation": "Storage screening heuristic; not unique changed bytes or a transfer estimate."})
-    print_assessment(report, args.units)
+    print_assessment(report, args.units, show_volume_details=args.show_volume_details)
 
     # 3. Build Lookup Maps
     host_to_vra = {}

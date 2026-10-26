@@ -178,9 +178,14 @@ class AssessmentTests(unittest.TestCase):
         report["threshold_percent"] = 30
         output = io.StringIO()
         with patch.object(discovery, "console", Console(file=output, width=100)):
-            discovery.print_assessment(report, "MiB")
+            discovery.print_assessment(report, "MiB", show_volume_details=True)
         rendered = output.getvalue()
         self.assertIn("Replica and journal VMDKs (MiB)", rendered)
+        default_output = io.StringIO()
+        with patch.object(discovery, "console", Console(file=default_output, width=100)):
+            discovery.print_assessment(report, "MiB")
+        self.assertNotIn("Replica and journal VMDKs", default_output.getvalue())
+        self.assertIn("Per-VM seed assessment", default_output.getvalue())
         # Wrapping can split paths, but must not replace path characters with ellipses.
         self.assertNotIn("…", rendered)
         self.assertIn("replica.vmdk", rendered)
@@ -253,6 +258,9 @@ class ClientTests(unittest.TestCase):
         with patch("sys.argv", ["discovery", "--auth-mode", "legacy"]):
             args = discovery.parse_args()
             self.assertEqual(args.port, 9669)
+            self.assertFalse(args.show_volume_details)
+        with patch("sys.argv", ["discovery", "--show-volume-details"]):
+            self.assertTrue(discovery.parse_args().show_volume_details)
         with patch("sys.argv", ["discovery", "--threshold", "nan"]), patch("sys.stderr", io.StringIO()):
             with self.assertRaises(SystemExit):
                 discovery.parse_args()

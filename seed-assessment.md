@@ -7,7 +7,7 @@ start vSphere Replication with a fresh initial sync. Its recommendations are
 ## Reading the report
 
 Script 01 prints per-VM and per-VPG tables alongside the existing disk inventory.
-The **Replica and journal VMDKs** table lists each current disk path, its VM/VPG,
+With `--show-volume-details`, the optional **Replica and journal VMDKs** table lists each current disk path, its VM/VPG,
 and its used/provisioned sizes in the selected units. Multiple journal volumes
 appear as separate rows: their sizes add up to the VM's journal totals. These are
 current Zerto disk paths, not the destination paths created by script 02.
@@ -67,6 +67,7 @@ interpreting the footprint.
 ```bash
 uv run 01_zerto_discover_and_export.py
 uv run 01_zerto_discover_and_export.py --threshold 40 --units MiB
+uv run 01_zerto_discover_and_export.py --show-volume-details --units MiB
 uv run 01_zerto_discover_and_export.py --auth-mode legacy --port 9669
 ```
 
@@ -93,6 +94,7 @@ this change has offline tests, not certification against every Zerto release.
 - `zerto_seeds_manifest.json`: unchanged disk-list format consumed by scripts 02–03.
 - `zerto_seed_assessment.json`: raw byte totals, VM/VPG identifiers, ratios,
   recommendations, data-quality issues, threshold, and UTC collection timestamps.
+  Disk details are always exported, even without `--show-volume-details`.
   Schema version 2 adds `volume_details`, the disk table as structured JSON rows:
   VM/VPG identifiers and names, `volume_type` (`replica` or `journal`), datastore,
   VMDK path/filename, and `used_bytes` / `provisioned_bytes`. The terminal formats

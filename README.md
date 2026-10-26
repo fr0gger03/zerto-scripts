@@ -145,7 +145,7 @@ uv run 01_zerto_discover_and_export.py --threshold 40 --units MiB
 ```
 
 4. Inspect `zerto_seed_assessment.json` and `zerto_seeds_manifest.json`.
-   The replica/journal VMDK table shows current disk paths and individual sizes.
+   Add `--show-volume-details` to print the optional replica/journal VMDK table.
    Paths and individual sizes are always saved in the assessment's `volume_details` rows.
    Recommendations do not filter the manifest: keep only selected disk entries
    before supplying it to scripts 02–03, which process every entry.
