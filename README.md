@@ -37,7 +37,7 @@ Copying Zerto target disks into standard datastore folders (`[Datastore] VM_Name
 | Requirement | Details |
 | --- | --- |
 | **Python Engine** | Python 3.13+ (Managed via `uv` or standard `pip`) |
-| **Python Libraries** | `requests`, `pyvmomi`, `rich`, `python-dotenv` |
+| **Python Libraries** | `requests`, `pyvmomi`, `rich`, `python-dotenv`, `questionary` |
 | **Zerto Permissions** | ZVMA / ZVM Keycloak Client ID & Client Secret |
 | **vCenter Permissions** | Account with `Datastore.FileManagement` privileges |
 
@@ -50,7 +50,7 @@ Install dependencies using `uv` or `pip`:
 uv sync
 
 # Or standard pip
-pip install requests pyvmomi rich python-dotenv
+pip install requests pyvmomi rich python-dotenv questionary
 
 ```
 
@@ -83,7 +83,8 @@ committed template containing placeholders only.
 | `VCENTER_USER` | Script 2 | vCenter account with `Datastore.FileManagement` |
 | `VCENTER_PASSWORD` | Script 2 | vCenter account password |
 | `VCENTER_DATACENTER` | Script 2 | vCenter Datacenter object name |
-| `MANIFEST_FILE` | Both | Optional. Manifest filename (default `zerto_seeds_manifest.json`) |
+| `MANIFEST_FILE` | Scripts 1–2 | Optional. Discovery manifest (default `zerto_seeds_manifest.json`) |
+| `MIGRATION_FILE` | Scripts 2–3 | Optional. Selected migration disks and copy results (default `zerto_migration_selection.json`) |
 | `VERIFY_SSL` | Both | Optional. `true` to enforce TLS verification (default `false` for self-signed certs) |
 
 Environment variables exported in your shell (or injected by a secret manager
@@ -97,9 +98,10 @@ Both scripts fail fast with a clear message listing every missing variable.
 ## Repository Structure
 
 * `01_zerto_discover_and_export.py` — Connects to Zerto ZVMA REST API, maps protected VMs to target ESXi hosts/VRAs, displays a formatted terminal table, and generates `zerto_seeds_manifest.json`.
-* `02_vcf_seed_copy.py` — Imports the manifest, connects to vCenter via `pyVmomi`, creates standard seed folders, and executes server-side VMDK copies.
-* `03_vmdk_descriptor_cleanup.py` — Imports the manifest, connects to vCenter, and comments out stale `ddb.iofilters` / `ddb.sidecars` references in each copied seed disk's descriptor file (see [Step 4](#step-4-clean-up-lingering-io-filter-references)).
+* `02_vcf_seed_copy.py` — Selects all VPGs or a subset with Questionary, saves `zerto_migration_selection.json`, connects to vCenter via `pyVmomi`, creates standard seed folders, and executes server-side VMDK copies.
+* `03_vmdk_descriptor_cleanup.py` — Reads successfully copied disks from the migration selection, connects to vCenter, and comments out stale `ddb.iofilters` / `ddb.sidecars` references in each copied seed disk's descriptor file (see [Step 4](#step-4-clean-up-lingering-io-filter-references)).
 * `config.py` — Shared `.env` loader, required-variable validation, and the `[Datastore] VM_Name/VMDK` path logic shared by scripts 2 and 3.
+* `migration_selection.py` — Shared selection validation and migration JSON persistence.
 * `journal_stats.py` — Offline VM/VPG journal aggregation and screening logic; `tests/` contains mocked unit tests.
 * `seed-assessment.md` — Interpretation, limitations, authentication options, and assessment output details.
 * `.env.example` — Template for the git-ignored `.env` file.
@@ -147,15 +149,24 @@ uv run 01_zerto_discover_and_export.py --threshold 40 --units MiB
 4. Inspect `zerto_seed_assessment.json` and `zerto_seeds_manifest.json`.
    Add `--show-volume-details` to print the optional replica/journal VMDK table.
    Paths and individual sizes are always saved in the assessment's `volume_details` rows.
-   Recommendations do not filter the manifest: keep only selected disk entries
-   before supplying it to scripts 02–03, which process every entry.
+   Recommendations remain advisory. Choose migration VPGs with script 02:
+
+```bash
+# Optional: select VPGs now, without connecting to vCenter or copying
+uv run 02_vcf_seed_copy.py --select-only
+```
+
+Choose **Keep all VPGs** or **Select a subset of VPGs**. In the checkbox list,
+use arrows to navigate, Space to toggle, and Enter to accept. All disks in each
+selected VPG are saved to `zerto_migration_selection.json`; discovery remains intact.
+Cancel with Ctrl+C to leave existing files unchanged.
 
 ### Step 2: Release File Locks in Zerto
 
 Before moving or copying replica files, ESXi file locks held by Zerto VRAs must be released:
 
 1. Open the **Zerto Management Interface**.
-2. Select the VPG(s) to migrate and click **Delete VPG** (or remove specific VMs).
+2. Select only the VPG(s) chosen for migration and click **Delete VPG** (or remove specific VMs).
 3. **CRITICAL:** Select **"Keep target disks"** when prompted.
 4. Confirm deletion. Zerto will detach the VMDKs from the target VRA.
 
@@ -178,13 +189,24 @@ VCENTER_DATACENTER=Datacenter-DR
 ```
 
 
-2. Execute the copy script:
+2. Execute the copy script to choose all VPGs or a subset and save the migration selection:
 ```bash
 uv run 02_vcf_seed_copy.py
 
 ```
 
-3. Confirm the prompt for each disk. The script creates the target `[Datastore] VM_Name` directory on vSAN/VMFS and initiates a `VirtualDiskManager` copy task.
+If you already saved a selection with `--select-only`, reuse it instead:
+
+```bash
+uv run 02_vcf_seed_copy.py --reuse-selection
+```
+
+3. Confirm the prompt for each selected disk. The script creates the target `[Datastore] VM_Name` directory on vSAN/VMFS and initiates a `VirtualDiskManager` copy task.
+
+Copy results are saved after each disk. `--reuse-selection` skips completed disks
+and offers pending, skipped, or failed disks again. A new selection asks before
+replacing an existing migration JSON. Use `--migration-file PATH` on both scripts,
+or set `MIGRATION_FILE` in `.env`, to use a different selection file.
 
 ![alt text](images/move-vmdk-04.png)
 
@@ -197,7 +219,9 @@ these can cause the eventual VM to fail to power on with an error like
 `Cannot open the disk '...' or one of the snapshot disks it depends on.`
 See [Broadcom KB 334555](https://knowledge.broadcom.com/external/article/334555/unable-to-power-on-vm-when-iofilters-is.html).
 
-Run Script 3 after Script 2 has finished copying:
+Run Script 3 after Script 2 has finished copying. It reads the same migration JSON
+and only processes disks marked `copied`; pending, skipped, and failed disks are
+excluded. It does not fall back to the full discovery manifest if selection is missing:
 
 ```bash
 # Preview what would change, without writing anything

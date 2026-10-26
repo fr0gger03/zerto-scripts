@@ -1,31 +1,19 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
+from pathlib import Path
 import ssl
+import sys
 
-# from pyVim.connect import Disconnect, SmartConnect
 from pyvim.connect import Disconnect, SmartConnect
 from pyVmomi import vim
 from rich.console import Console
 from rich.prompt import Confirm
 
 import config
+from migration_selection import choose_disks, create_plan, load_plan, save_plan, validate_disks
 
-# --- vCenter Configuration (loaded from .env — see .env.example) ---
-try:
-    _env = config.require(
-        "VCENTER_IP",
-        "VCENTER_USER",
-        "VCENTER_PASSWORD",
-        "VCENTER_DATACENTER",
-    )
-except config.ConfigError as exc:
-    config.fail(str(exc))
-
-VCENTER_IP = _env["VCENTER_IP"]
-VCENTER_USER = _env["VCENTER_USER"]
-VCENTER_PASSWORD = _env["VCENTER_PASSWORD"]
-DATACENTER_NAME = _env["VCENTER_DATACENTER"]  # vCenter Datacenter Object Name
 MANIFEST_FILE = config.MANIFEST_FILE
 VERIFY_SSL = config.VERIFY_SSL
 
@@ -45,19 +33,55 @@ def wait_for_task(task):
 def main():
     console.rule("[bold cyan]vSphere Datastore Seed Copier")
 
-    # 1. Load JSON Manifest
+    parser = argparse.ArgumentParser(description="Choose VPGs, save a migration plan, and copy seed disks.")
+    parser.add_argument("--migration-file", default=config.MIGRATION_FILE,
+                        help="Shared migration selection JSON used by scripts 02 and 03.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--select-only", action="store_true", help="Save VPG selection without connecting to vCenter.")
+    mode.add_argument("--reuse-selection", action="store_true", help="Copy pending/skipped/failed disks from a saved selection.")
+    args = parser.parse_args()
     try:
-        with open(MANIFEST_FILE, "r") as f:
-            manifest = json.load(f)
-    except Exception as e:
-        console.print(f"[bold red]Failed to load {MANIFEST_FILE}:[/bold red] {e}")
-        return
+        if Path(args.migration_file).resolve() == Path(MANIFEST_FILE).resolve():
+            raise ValueError("Migration output must differ from the discovery manifest")
+        if args.reuse_selection:
+            plan = load_plan(args.migration_file)
+        else:
+            with open(MANIFEST_FILE) as stream:
+                discovery = json.load(stream)
+            validate_disks(discovery)
+            if not discovery:
+                console.print("[yellow]Discovery manifest is empty. Nothing to select.[/yellow]")
+                return
+            manifest = choose_disks(discovery)
+            if manifest is None:
+                console.print("[yellow]Selection cancelled. No files changed.[/yellow]")
+                return
+            plan = create_plan(manifest, MANIFEST_FILE)
+            if Path(args.migration_file).exists() and not Confirm.ask(
+                f"Replace existing migration selection {args.migration_file}?", default=False
+            ):
+                console.print("[yellow]Selection not saved. No copy started.[/yellow]")
+                return
+            save_plan(plan, args.migration_file)
+        manifest = [disk for disk in plan["disks"] if disk["copy_status"] != "copied"]
+        console.print(f"Migration selection: {args.migration_file} ({len(plan['disks'])} disk(s), "
+                      f"{len(manifest)} remaining). Script 03 uses this same file.")
+        if args.select_only:
+            console.print("Selection saved. Keep target disks when unprotecting selected VPGs, "
+                          "then rerun with --reuse-selection.")
+            return
+        if not manifest:
+            console.print("[yellow]No remaining disks to copy.[/yellow]")
+            return
+        env = config.require("VCENTER_IP", "VCENTER_USER", "VCENTER_PASSWORD", "VCENTER_DATACENTER")
+    except (OSError, ValueError, config.ConfigError) as exc:
+        console.print(f"Cannot prepare migration: {exc}", style="red", markup=False)
+        sys.exit(1)
 
-    if not manifest:
-        console.print("[yellow]Manifest is empty. Nothing to copy.[/yellow]")
-        return
-
-    console.print(f"Loaded [bold white]{len(manifest)}[/bold white] volume(s) from [bold white]{MANIFEST_FILE}[/bold white].")
+    VCENTER_IP = env["VCENTER_IP"]
+    VCENTER_USER = env["VCENTER_USER"]
+    VCENTER_PASSWORD = env["VCENTER_PASSWORD"]
+    DATACENTER_NAME = env["VCENTER_DATACENTER"]
 
     # 2. Connect to vCenter
     console.print(f"[bold green]Connecting to vCenter {VCENTER_IP}...[/bold green]")
@@ -130,18 +154,26 @@ def main():
 
                 # --- STEP B: Copy Virtual Disk ---
                 with console.status(f"[bold magenta]Copying Virtual Disk for {vm_name}..."):
-                    copy_task = vdisk_mgr.CopyVirtualDisk_Task(
-                        sourceName=src_raw_path,
-                        sourceDatacenter=datacenter,
-                        destName=dest_vmdk_path,
-                        destDatacenter=datacenter,
-                        force=False,
-                    )
-                    success = wait_for_task(copy_task)
+                    try:
+                        copy_task = vdisk_mgr.CopyVirtualDisk_Task(
+                            sourceName=src_raw_path,
+                            sourceDatacenter=datacenter,
+                            destName=dest_vmdk_path,
+                            destDatacenter=datacenter,
+                            force=False,
+                        )
+                        success = wait_for_task(copy_task)
+                    except Exception as exc:
+                        console.print(f"Copy failed for {vm_name}: {exc}", style="red", markup=False)
+                        success = False
+                item["copy_status"] = "copied" if success else "failed"
+                save_plan(plan, args.migration_file)
 
                 if success:
                     console.print(f"[bold green]✔ Successfully copied seed VMDK for {vm_name}![/bold green]")
             else:
+                item["copy_status"] = "skipped"
+                save_plan(plan, args.migration_file)
                 console.print(f"[yellow]Skipped copy for {vm_name}.[/yellow]")
 
     finally:

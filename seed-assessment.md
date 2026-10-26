@@ -91,7 +91,9 @@ this change has offline tests, not certification against every Zerto release.
 
 ## Outputs and workflow
 
-- `zerto_seeds_manifest.json`: unchanged disk-list format consumed by scripts 02–03.
+- `zerto_seeds_manifest.json`: full discovery disk list, used as input by script 02.
+- `zerto_migration_selection.json`: selected VPGs/disks and per-disk copy status,
+  shared by scripts 02–03. `MIGRATION_FILE` or `--migration-file` sets its path.
 - `zerto_seed_assessment.json`: raw byte totals, VM/VPG identifiers, ratios,
   recommendations, data-quality issues, threshold, and UTC collection timestamps.
   Disk details are always exported, even without `--show-volume-details`.
@@ -109,11 +111,25 @@ overrides the assessment path. Paths are relative to the working directory.
 Display units are GiB (`bytes / 1024³`) or MiB (`bytes / 1024²`); JSON retains bytes.
 Default artifacts are git-ignored; exclude custom output names too.
 
-Recommendations **never filter the manifest**. Before unprotecting workloads,
-review the report and retain only the selected disk entries in the manifest used
-by scripts 02–03. Those scripts still process every entry supplied. Keep target
-disks when unprotecting, then copy and preview descriptor cleanup as documented in
-the [README](README.md#step-by-step-usage).
+Recommendations **never automatically select VPGs**. Use script 02's Questionary
+menu to keep all VPGs or choose a subset. All disks in each chosen VPG are retained;
+VPG identifiers are used when present, otherwise VPG names. With existing discovery
+files, VPG names must distinguish the groups you want to select.
+
+Use `uv run 02_vcf_seed_copy.py --select-only` to save the selection before
+unprotecting. Keep target disks for the chosen VPGs, then run script 02 with
+`--reuse-selection`. Script 03 reads the same migration JSON and only cleans disks
+marked `copied`. Selection does not delete VPGs or release Zerto locks.
+
+The migration JSON contains `schema_version`, `created_at`, `source_manifest`,
+`selected_vpgs`, and `disks`. Each disk keeps its discovery fields plus a
+`copy_status`: `pending`, `copied`, `skipped`, or `failed`. Copy results are saved
+atomically after each disk. Reusing the file retries non-completed disks; it does
+not overwrite existing destination VMDKs. If execution stops after a vCenter copy
+finishes but before its result is saved, verify the destination before retrying.
+A fresh selection resets copy statuses and asks before replacing the existing file.
+Keep this file for script 03, including when running cleanup with `--dry-run`.
+See the [README](README.md#step-by-step-usage) for the complete sequence.
 
 ## Verification and references
 

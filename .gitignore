@@ -18,6 +18,7 @@ secrets.json
 # infrastructure detail (datastore names, VM names, vSAN paths).
 zerto_seeds_manifest.json
 zerto_seed_assessment.json
+zerto_migration_selection.json
 *.log
 
 # ---------------------------------------------------------------------------

@@ -71,6 +71,9 @@ def fail(message: str) -> None:
 # Filename of the manifest handed off from script 01 to script 02.
 MANIFEST_FILE = get_env("MANIFEST_FILE", "zerto_seeds_manifest.json")
 
+# Selected migration disks and copy results shared by scripts 02 and 03.
+MIGRATION_FILE = get_env("MIGRATION_FILE", "zerto_migration_selection.json")
+
 # Set VERIFY_SSL=true once trusted certificates are installed on ZVM/vCenter.
 VERIFY_SSL = get_bool_env("VERIFY_SSL", False)
 

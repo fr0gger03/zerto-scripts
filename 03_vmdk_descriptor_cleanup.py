@@ -16,7 +16,7 @@ See: https://knowledge.broadcom.com/external/article/334555/
 
 Per that KB, the fix is to comment out (not delete) the offending lines in
 the disk descriptor file. This script edits ONLY the small text descriptor
-(the `.vmdk` referenced in the manifest) -- never the large `-flat.vmdk` data
+(the `.vmdk` referenced in the migration selection) -- never the large `-flat.vmdk` data
 extent -- by fetching it over vCenter's datastore HTTP file-access API,
 reusing the existing pyVmomi session (no separate ESXi/SSH credentials
 needed), commenting out the offending lines, and writing it back in place.
@@ -27,7 +27,6 @@ serves as the recovery point if something needs to be redone.
 """
 
 import argparse
-import json
 import ssl
 import sys
 from urllib.parse import quote, urlencode
@@ -39,6 +38,7 @@ from rich.console import Console
 from rich.prompt import Confirm
 
 import config
+from migration_selection import load_plan
 
 # --- vCenter Configuration (loaded from .env — see .env.example) ---
 # Reuses the same vCenter variables as 02_vcf_seed_copy.py.
@@ -56,7 +56,7 @@ VCENTER_IP = _env["VCENTER_IP"]
 VCENTER_USER = _env["VCENTER_USER"]
 VCENTER_PASSWORD = _env["VCENTER_PASSWORD"]
 DATACENTER_NAME = _env["VCENTER_DATACENTER"]
-MANIFEST_FILE = config.MANIFEST_FILE
+MIGRATION_FILE = config.MIGRATION_FILE
 VERIFY_SSL = config.VERIFY_SSL
 
 # Descriptor keys known to cause power-on failures when they reference an
@@ -147,6 +147,10 @@ def main():
         action="store_true",
         help="Apply changes without per-VM confirmation prompts.",
     )
+    parser.add_argument(
+        "--migration-file", default=MIGRATION_FILE,
+        help="Migration selection JSON saved by script 02 (only copied disks are cleaned).",
+    )
     args = parser.parse_args()
 
     console.rule("[bold cyan]VMDK Descriptor I/O Filter Cleanup")
@@ -154,16 +158,19 @@ def main():
         "[dim]Ref: https://knowledge.broadcom.com/external/article/334555/[/dim]\n"
     )
 
-    # 1. Load JSON Manifest
+    # Read the same selection and copy results used by script 02.
     try:
-        with open(MANIFEST_FILE, "r") as f:
-            manifest = json.load(f)
-    except Exception as e:
-        console.print(f"[bold red]Failed to load {MANIFEST_FILE}:[/bold red] {e}")
-        return
-
+        plan = load_plan(args.migration_file)
+    except (OSError, ValueError) as exc:
+        console.print(f"Cannot load migration selection {args.migration_file}: {exc}", style="red", markup=False)
+        console.print("Run script 02 first to select VPGs and copy their disks.")
+        sys.exit(1)
+    manifest = [disk for disk in plan["disks"] if disk["copy_status"] == "copied"]
+    skipped = len(plan["disks"]) - len(manifest)
+    console.print(f"Migration selection: {args.migration_file}; {len(manifest)} copied disk(s), "
+                  f"{skipped} pending/skipped/failed disk(s) excluded.")
     if not manifest:
-        console.print("[yellow]Manifest is empty. Nothing to clean up.[/yellow]")
+        console.print("[yellow]No successfully copied disks to clean up. Run script 02 first.[/yellow]")
         return
 
     # 2. Connect to vCenter (also used to mint the HTTP session cookie)
@@ -200,7 +207,7 @@ def main():
         session = requests.Session()
         session.headers.update({"Cookie": get_session_cookie(si)})
 
-        # 3. Process each seed disk from the manifest
+        # 3. Process successfully copied disks from the migration selection
         for idx, item in enumerate(manifest, 1):
             ds_name = item["datastore"]
             vm_name = item["vm_name"]

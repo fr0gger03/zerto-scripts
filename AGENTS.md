@@ -5,8 +5,8 @@
 This repository migrates Zerto replica VMDKs into VMware Cloud Foundation or vSphere Replication seed disks. Python scripts live at the repository root and run in sequence:
 
 - `01_zerto_discover_and_export.py`: discovers replicas and exports a JSON manifest.
-- `02_vcf_seed_copy.py`: copies disks into datastore seed folders.
-- `03_vmdk_descriptor_cleanup.py`: comments out stale I/O filter references in copied descriptors.
+- `02_vcf_seed_copy.py`: selects VPGs with Questionary, saves migration JSON, and copies selected disks.
+- `03_vmdk_descriptor_cleanup.py`: reads the migration JSON and cleans successfully copied descriptors.
 - `config.py`: loads environment settings, validates required variables, and computes shared datastore paths.
 
 `README.md` documents the workflow; `keycloak.md` covers authentication. Documentation screenshots belong in `images/`. There is no dedicated source package. `journal_stats.py` holds assessment calculations; `tests/` contains offline unit tests. See `seed-assessment.md` for interpretation.

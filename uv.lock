@@ -63,6 +63,18 @@ wheels = [
 ]
 
 [[package]]
+name = "prompt-toolkit"
+version = "3.0.53"
+source = { registry = "https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/simple" }
+dependencies = [
+    { name = "wcwidth" },
+]
+sdist = { url = "https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/packages/packages/7d/ea/39b988c938f75cb75d7045b5c69f8bfed47ee2152c8837fb403de29d6fb8/prompt_toolkit-3.0.53.tar.gz", hash = "sha256:9ec8a0ad96d5c56148b3f914aa79c1564c3fde5d2e6b876e7bc327e353cf8fa6" }
+wheels = [
+    { url = "https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/packages/packages/54/6f/84908cad2d6aa5144abcf7b42709fe4fdb459bc640ec7ac5786e7693dabc/prompt_toolkit-3.0.53-py3-none-any.whl", hash = "sha256:01c0891d7f9237d5e339f7d3e42cdae80b7534abb1c7c0e3352efba6231492f2" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/simple" }
@@ -82,6 +94,7 @@ dependencies = [
     { name = "prettytable" },
     { name = "python-dotenv" },
     { name = "pyvmomi" },
+    { name = "questionary" },
     { name = "requests" },
     { name = "rich" },
     { name = "urllib3" },
@@ -96,6 +109,7 @@ requires-dist = [
     { name = "prettytable", specifier = "==3.8.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "pyvmomi", specifier = ">=9.1.0.0" },
+    { name = "questionary", specifier = ">=2.1,<3" },
     { name = "requests", specifier = "==2.33.0" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "urllib3", specifier = "==2.8.0" },
@@ -117,6 +131,18 @@ version = "9.1.0.0"
 source = { registry = "https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/simple" }
 wheels = [
     { url = "https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/packages/packages/bd/5c/044debed55cf2ea6f7bdd7da7bb4c0b5feeb06158380dfd0b450b3b55611/pyvmomi-9.1.0.0-py3-none-any.whl", hash = "sha256:f4b024baa7e5179d14f350dd006b788365e4aaadf15850e36024945a114db92b" },
+]
+
+[[package]]
+name = "questionary"
+version = "2.1.1"
+source = { registry = "https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/simple" }
+dependencies = [
+    { name = "prompt-toolkit" },
+]
+sdist = { url = "https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/packages/packages/f6/45/eafb0bba0f9988f6a2520f9ca2df2c82ddfa8d67c95d6625452e97b204a5/questionary-2.1.1.tar.gz", hash = "sha256:3d7e980292bb0107abaa79c68dd3eee3c561b83a0f89ae482860b181c8bd412d" }
+wheels = [
+    { url = "https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/packages/packages/3c/26/1062c7ec1b053db9e499b4d2d5bc231743201b74051c973dadeac80a8f43/questionary-2.1.1-py3-none-any.whl", hash = "sha256:a51af13f345f1cdea62347589fbb6df3b290306ab8930713bfae4d475a7d4a59" },
 ]
 
 [[package]]
