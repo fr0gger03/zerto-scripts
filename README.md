@@ -1,8 +1,8 @@
 # Zerto to VCF Protection & Recovery Seed Migration Toolset
 
-This repository provides a two-phase automation workflow for converting active Zerto replica VMDKs into clean, vSphere-native seed disks for **VMware Cloud Foundation (VCF) Protection & Recovery** or **vSphere Replication**.
+This repository provides an automation workflow for converting active Zerto replica VMDKs into clean, vSphere-native seed disks for **VMware Cloud Foundation (VCF) Protection & Recovery** or **vSphere Replication**.
 
-By copying Zerto target disks into standard datastore folders (`[Datastore] VM_Name/VMDK`), you can eliminate full-resynchronization over the network and drastically speed up disaster recovery cutovers.
+Copying Zerto target disks into standard datastore folders (`[Datastore] VM_Name/VMDK`) can reduce initial replication traffic. Script 01 reports journal and replica storage per VM and VPG to help evaluate whether seeds are worthwhile. See [journal assessment and decision guidance](seed-assessment.md).
 
 ---
 
@@ -36,7 +36,7 @@ By copying Zerto target disks into standard datastore folders (`[Datastore] VM_N
 
 | Requirement | Details |
 | --- | --- |
-| **Python Engine** | Python 3.10+ (Managed via `uv` or standard `pip`) |
+| **Python Engine** | Python 3.13+ (Managed via `uv` or standard `pip`) |
 | **Python Libraries** | `requests`, `pyvmomi`, `rich`, `python-dotenv` |
 | **Zerto Permissions** | ZVMA / ZVM Keycloak Client ID & Client Secret |
 | **vCenter Permissions** | Account with `Datastore.FileManagement` privileges |
@@ -72,7 +72,11 @@ committed template containing placeholders only.
 
 | Variable | Used by | Description |
 | --- | --- | --- |
-| `ZVM_IP` | Script 1 | Zerto ZVMA IP or FQDN (no scheme) |
+| `ZVM_IP` | Script 1 | Zerto ZVM IP or FQDN (no scheme or port) |
+| `ZVM_AUTH_MODE` / `ZVM_PORT` | Script 1 | Optional. `oauth` (443, default) or `legacy` (9669); port can be overridden |
+| `ZVM_USER` / `ZVM_PASSWORD` | Script 1 | Credentials required only in legacy mode |
+| `JOURNAL_THRESHOLD_PERCENT` | Script 1 | Optional. Screening threshold, default `30` |
+| `ASSESSMENT_FILE` | Script 1 | Optional. Assessment JSON, default `zerto_seed_assessment.json` |
 | `ZVM_CLIENT_ID` | Script 1 | Keycloak OAuth client ID (see [keycloak.md](keycloak.md)) |
 | `ZVM_CLIENT_SECRET` | Script 1 | Keycloak OAuth client secret |
 | `VCENTER_IP` | Script 2 | vCenter Server IP or FQDN (no scheme) |
@@ -96,6 +100,8 @@ Both scripts fail fast with a clear message listing every missing variable.
 * `02_vcf_seed_copy.py` — Imports the manifest, connects to vCenter via `pyVmomi`, creates standard seed folders, and executes server-side VMDK copies.
 * `03_vmdk_descriptor_cleanup.py` — Imports the manifest, connects to vCenter, and comments out stale `ddb.iofilters` / `ddb.sidecars` references in each copied seed disk's descriptor file (see [Step 4](#step-4-clean-up-lingering-io-filter-references)).
 * `config.py` — Shared `.env` loader, required-variable validation, and the `[Datastore] VM_Name/VMDK` path logic shared by scripts 2 and 3.
+* `journal_stats.py` — Offline VM/VPG journal aggregation and screening logic; `tests/` contains mocked unit tests.
+* `seed-assessment.md` — Interpretation, limitations, authentication options, and assessment output details.
 * `.env.example` — Template for the git-ignored `.env` file.
 
 ---
@@ -127,7 +133,20 @@ uv run 01_zerto_discover_and_export.py
 
 ![alt text](images/move-vmdk-02.png)
 
-3. Inspect the terminal output and verify that `zerto_seeds_manifest.json` has been created.
+3. Review the per-VM and per-VPG journal assessment before deciding to proceed.
+   The default policy flags journal-used / replica-used ratios above 30% as
+   `FULL SYNC RECOMMENDED`; missing or ambiguous measurements are `UNKNOWN`.
+   This is a storage heuristic, not a transfer estimate. See the
+   [decision guidance](seed-assessment.md) for interpretation and limitations.
+
+```bash
+# Optional: use a 40% threshold and display MiB instead of GiB
+uv run 01_zerto_discover_and_export.py --threshold 40 --units MiB
+```
+
+4. Inspect `zerto_seed_assessment.json` and `zerto_seeds_manifest.json`.
+   Recommendations do not filter the manifest: keep only selected disk entries
+   before supplying it to scripts 02–03, which process every entry.
 
 ### Step 2: Release File Locks in Zerto
 

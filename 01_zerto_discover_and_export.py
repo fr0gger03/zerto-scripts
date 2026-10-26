@@ -1,79 +1,167 @@
 #!/usr/bin/env python3
+"""Discover recovery disks and report advisory journal storage assessments."""
+
+import argparse
+from datetime import datetime, timezone
 import json
+import math
+from pathlib import Path
+import sys
 
 import requests
 from rich.console import Console
 from rich.table import Table
 
 import config
+from journal_stats import assess, get_val, vm_identifier, volume_type
 
-# --- ZVMA Configuration (loaded from .env — see .env.example) ---
-try:
-    _env = config.require("ZVM_IP", "ZVM_CLIENT_ID", "ZVM_CLIENT_SECRET")
-except config.ConfigError as exc:
-    config.fail(str(exc))
-
-ZVM_IP = _env["ZVM_IP"]
-ZVM_CLIENT_ID = _env["ZVM_CLIENT_ID"]
-ZVM_CLIENT_SECRET = _env["ZVM_CLIENT_SECRET"]
-MANIFEST_FILE = config.MANIFEST_FILE
-VERIFY_SSL = config.VERIFY_SSL
-
-# Disable SSL warnings for self-signed certificates
-if not VERIFY_SSL:
-    requests.packages.urllib3.disable_warnings()
-base_url = f"https://{ZVM_IP}"
 console = Console()
 
 
-def get_val(obj, key, default=None):
-    """Case-insensitive dictionary getter for API variations."""
-    if not isinstance(obj, dict):
-        return default
-    if key in obj:
-        return obj[key]
-    pascal = key[0].upper() + key[1:] if key else key
-    if pascal in obj:
-        return obj[pascal]
-    camel = key[0].lower() + key[1:] if key else key
-    if camel in obj:
-        return obj[camel]
-    return default
+class ZertoClient:
+    """Keep appliance bearer and legacy session authentication separate."""
+
+    def __init__(self, host: str, port: int, mode: str, verify: bool, timeout: float):
+        self.base_url = f"https://{host}:{port}"
+        self.mode = mode
+        self.session = requests.Session()
+        self.session.verify = verify
+        self.timeout = timeout
+        self.session.headers.update({"Accept": "application/json"})
+
+    def authenticate(self) -> None:
+        if self.mode == "oauth":
+            env = config.require("ZVM_CLIENT_ID", "ZVM_CLIENT_SECRET")
+            response = self.session.post(
+                f"{self.base_url}/auth/realms/zerto/protocol/openid-connect/token",
+                data={"grant_type": "client_credentials", "client_id": env["ZVM_CLIENT_ID"],
+                      "client_secret": env["ZVM_CLIENT_SECRET"]}, timeout=self.timeout)
+            response.raise_for_status()
+            payload = response.json()
+            token = payload.get("access_token") if isinstance(payload, dict) else None
+            if not isinstance(token, str) or not token:
+                raise ValueError("OAuth response did not include an access token")
+            self.session.headers["Authorization"] = f"Bearer {token}"
+        else:
+            env = config.require("ZVM_USER", "ZVM_PASSWORD")
+            response = self.session.post(
+                f"{self.base_url}/v1/session/add", auth=(env["ZVM_USER"], env["ZVM_PASSWORD"]),
+                json={"AuthenticationMethod": 1}, timeout=self.timeout)
+            response.raise_for_status()
+            token = response.headers.get("x-zerto-session")
+            if not token:
+                raise ValueError("Legacy response did not include x-zerto-session")
+            self.session.headers["x-zerto-session"] = token
+
+    def get_list(self, endpoint: str) -> list[dict]:
+        response = self.session.get(f"{self.base_url}/v1/{endpoint}", timeout=self.timeout)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+            raise ValueError(f"{endpoint}: expected an array of objects")
+        return data
+
+    def close(self) -> None:
+        try:
+            if "x-zerto-session" in self.session.headers:
+                response = self.session.delete(f"{self.base_url}/v1/session", timeout=self.timeout)
+                response.raise_for_status()
+        except requests.RequestException:
+            console.print("[yellow]Could not end the legacy API session; it will expire.[/yellow]")
+        finally:
+            self.session.close()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Discover seed disks and assess reported journal storage.")
+    parser.add_argument("--auth-mode", choices=("oauth", "legacy"),
+                        default=config.get_env("ZVM_AUTH_MODE", "oauth"))
+    parser.add_argument("--port", type=int, default=config.get_env("ZVM_PORT") or None)
+    parser.add_argument("--insecure", action="store_true", help="Bypass TLS certificate verification.")
+    parser.add_argument("--threshold", type=float,
+                        default=config.get_env("JOURNAL_THRESHOLD_PERCENT", "30"),
+                        help="Advisory journal-used / replica-used threshold (default: 30 percent).")
+    parser.add_argument("--units", choices=("MiB", "GiB"), default="GiB")
+    parser.add_argument("--assessment-file", default=config.get_env("ASSESSMENT_FILE", "zerto_seed_assessment.json"))
+    parser.add_argument("--timeout", type=float, default=30, help="HTTP timeout in seconds (default: 30).")
+    args = parser.parse_args()
+    if args.auth_mode not in {"oauth", "legacy"}:
+        parser.error("ZVM_AUTH_MODE must be oauth or legacy")
+    if not math.isfinite(args.threshold) or args.threshold < 0:
+        parser.error("threshold must be a finite, nonnegative percentage")
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("timeout must be finite and positive")
+    if args.port is None:
+        args.port = 443 if args.auth_mode == "oauth" else 9669
+    if not 1 <= args.port <= 65535:
+        parser.error("port must be between 1 and 65535")
+    return args
+
+
+def print_assessment(report: dict, units: str) -> None:
+    divisor = 1024 ** (2 if units == "MiB" else 3)
+
+    def size(value):
+        return "UNKNOWN" if value is None else f"{value / divisor:,.2f}"
+
+
+    for group, title in (("vms", "Per-VM seed assessment"), ("vpgs", "Per-VPG seed assessment")):
+        table = Table(title=f"{title} ({units})", header_style="bold magenta")
+        table.add_column("VPG", overflow="fold")
+        table.add_column("VM" if group == "vms" else "VMs / Full / ?", overflow="fold")
+        for label in ("Journal\nused / prov.", "Replica\nused / prov.", "J/R %"):
+            table.add_column(label, justify="right", overflow="fold")
+        table.add_column("Recommendation", overflow="fold")
+        for row in report[group]:
+            percent = row["journal_replica_used_percent"]
+            detail = (row["vm_name"] if group == "vms" else
+                      f"{row['vm_count']} / {row['full_sync_vm_count']} / {row['unknown_vm_count']}")
+            table.add_row(row["vpg_name"], detail,
+                          f"{size(row['journal_used_bytes'])} / {size(row['journal_provisioned_bytes'])}",
+                          f"{size(row['replica_used_bytes'])} / {size(row['replica_provisioned_bytes'])}",
+                          "UNKNOWN" if percent is None else f"{percent:.2f}", row["recommendation"])
+        console.print(table)
+    console.print(f"J/R = journal used / replica used. Above {report['threshold_percent']:g}%: full-sync heuristic.")
+    console.print("Journal storage is not unique changed bytes; compression and repeated writes affect the ratio.")
+    console.print("Copied replicas omit newer journal writes. Also consider copy time, disk reads, network speed, and ongoing writes.")
+    console.print("UNKNOWN = incomplete/ambiguous data. VPG totals can mask individual VMs; Full / ? counts highlight them.")
+    affected = sum(bool(row["issues"]) for row in report["vms"])
+    if affected or report["warnings"]:
+        console.print(f"[yellow]Data quality: {affected} VM(s) with issues; {len(report['warnings'])} attribution warning(s). See assessment JSON.[/yellow]")
+    console.print("Review seed-assessment.md before choosing scripts 02–03; recommendations never filter the manifest.")
 
 
 def main():
-    console.rule("[bold cyan]Zerto Seed Discovery & Manifest Generator")
-
-    # 1. Authenticate with Keycloak
-    with console.status("[bold green]Authenticating with Zerto ZVMA..."):
-        token_req = requests.post(
-            f"{base_url}/auth/realms/zerto/protocol/openid-connect/token",
-            data={
-                "grant_type": "client_credentials",
-                "client_id": ZVM_CLIENT_ID,
-                "client_secret": ZVM_CLIENT_SECRET,
-            },
-            verify=VERIFY_SSL,
-        )
-
-    token_resp = token_req.json()
-    if "access_token" not in token_resp:
-        console.print(f"[bold red]Zerto Auth Failed:[/bold red] {token_resp}")
-        exit(1)
-
-    headers = {"Authorization": f"Bearer {token_resp['access_token']}"}
-
-    # 2. Fetch Zerto Metadata
-    with console.status("[bold cyan]Querying VRAs, VMs, and Volumes..."):
-        vras_data = requests.get(
-            f"{base_url}/v1/vras", headers=headers, verify=VERIFY_SSL
-        ).json()
-        vms_data = requests.get(
-            f"{base_url}/v1/vms", headers=headers, verify=VERIFY_SSL
-        ).json()
-        volumes_data = requests.get(
-            f"{base_url}/v1/volumes", headers=headers, verify=VERIFY_SSL
-        ).json()
+    args = parse_args()
+    manifest_path = Path(config.MANIFEST_FILE)
+    assessment_path = Path(args.assessment_file)
+    if manifest_path.resolve() == assessment_path.resolve():
+        raise ValueError("Manifest and assessment must use different output files")
+    host = config.require("ZVM_IP")["ZVM_IP"]
+    verify = config.VERIFY_SSL and not args.insecure
+    if not verify:
+        requests.packages.urllib3.disable_warnings()
+    console.rule("[bold cyan]Zerto Seed Discovery & Journal Assessment")
+    if not verify:
+        console.print("[yellow]TLS certificate verification disabled.[/yellow]")
+    client = ZertoClient(host, args.port, args.auth_mode, verify, args.timeout)
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        with console.status("Authenticating and querying VRAs, VMs, and volumes..."):
+            client.authenticate()
+            vras_data = client.get_list("vras")
+            vms_data = client.get_list("vms")
+            # One unfiltered collection supplies both recovery and journal metrics.
+            volumes_data = client.get_list("volumes")
+    finally:
+        client.close()
+    report = assess(vms_data, volumes_data, args.threshold)
+    report.update({"schema_version": 1, "collection_started_at": started_at,
+                   "collection_finished_at": datetime.now(timezone.utc).isoformat(),
+                   "threshold_percent": args.threshold, "byte_units": "bytes",
+                   "ratio_basis": "journal_used_bytes / replica_used_bytes * 100",
+                   "interpretation": "Storage screening heuristic; not unique changed bytes or a transfer estimate."})
+    print_assessment(report, args.units)
 
     # 3. Build Lookup Maps
     host_to_vra = {}
@@ -88,18 +176,15 @@ def main():
 
     vm_map = {}
     for vm in vms_data:
-        vm_id = (
-            get_val(vm, "vmIdentifier")
-            or get_val(get_val(vm, "link"), "identifier")
-            or get_val(vm, "identifier")
-        )
+        vm_id = vm_identifier(vm)
         if vm_id:
-            vm_map[vm_id] = {
+            vm_map.setdefault(vm_id, []).append({
                 "vm_name": get_val(vm, "vmName", "Unknown_VM"),
                 "vpg_name": get_val(vm, "vpgName", "Unknown_VPG"),
+                "vpg_identifier": get_val(vm, "vpgIdentifier"),
                 "recovery_host_id": get_val(vm, "recoveryHostIdentifier"),
                 "recovery_host_name": get_val(vm, "recoveryHostName"),
-            }
+            })
 
     # 4. Process Recovery Volumes & Format Output
     manifest = []
@@ -115,12 +200,20 @@ def main():
     table.add_column("Destination Seed Path (vSphere Spec)", style="bold blue")
 
     for vol in volumes_data:
-        if get_val(vol, "volumeType") == "Recovery":
+        if volume_type(vol) == "recovery":
             prot_vm = (
                 get_val(vol, "protectedVm") or get_val(vol, "owningVm") or {}
             )
             vm_id = get_val(prot_vm, "identifier")
-            vm_info = vm_map.get(vm_id, {})
+            candidates = vm_map.get(vm_id, [])
+            volume_vpg = get_val(vol, "vpg", {})
+            if len(candidates) > 1:
+                vpg_id = get_val(volume_vpg, "identifier")
+                vpg_name = get_val(volume_vpg, "name")
+                candidates = [vm for vm in candidates if
+                              (vpg_id and vm["vpg_identifier"] == vpg_id) or
+                              (not vpg_id and vpg_name and vm["vpg_name"] == vpg_name)]
+            vm_info = candidates[0] if len(candidates) == 1 else {}
 
             vm_name = vm_info.get("vm_name") or get_val(
                 prot_vm, "name", "Unknown_VM"
@@ -177,16 +270,31 @@ def main():
     console.print(table)
 
     # 5. Export Manifest JSON
-    with open(MANIFEST_FILE, "w") as f:
+    with manifest_path.open("w") as f:
         json.dump(manifest, f, indent=4)
 
+    with assessment_path.open("w") as f:
+        json.dump(report, f, indent=4)
+
     console.print(
-        f"\n[bold green]✔ Manifest exported successfully to:[/bold green] [bold white]{MANIFEST_FILE}[/bold white]"
+        f"\n[bold green]✔ Manifest exported successfully to:[/bold green] [bold white]{manifest_path}[/bold white]"
     )
     console.print(
-        "[bold yellow]Next Step:[/bold yellow] Delete/unprotect VPG in Zerto (keep target disks), then run Script 2.\n"
+        f"Assessment saved to {assessment_path}. Review recommendations before unprotecting any VPG.\n"
+        "For selected workloads only: keep target disks when unprotecting, then run scripts 02–03."
     )
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except config.ConfigError as exc:
+        config.fail(str(exc))
+    except requests.RequestException as exc:
+        status = exc.response.status_code if exc.response is not None else "unavailable"
+        console.print(f"[red]API request failed ({type(exc).__name__}, HTTP {status}). "
+                      "Check host, port, credentials, API permissions, TLS, and connectivity.[/red]")
+        sys.exit(1)
+    except (ValueError, OSError) as exc:
+        console.print(f"Discovery failed: {exc}", style="red", markup=False)
+        sys.exit(1)

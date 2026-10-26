@@ -17,6 +17,7 @@ secrets.json
 # Manifest produced by 01_zerto_discover_and_export.py contains site-specific
 # infrastructure detail (datastore names, VM names, vSAN paths).
 zerto_seeds_manifest.json
+zerto_seed_assessment.json
 *.log
 
 # ---------------------------------------------------------------------------

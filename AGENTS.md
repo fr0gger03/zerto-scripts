@@ -9,11 +9,11 @@ This repository migrates Zerto replica VMDKs into VMware Cloud Foundation or vSp
 - `03_vmdk_descriptor_cleanup.py`: comments out stale I/O filter references in copied descriptors.
 - `config.py`: loads environment settings, validates required variables, and computes shared datastore paths.
 
-`README.md` documents the workflow; `keycloak.md` covers authentication. Documentation screenshots belong in `images/`. There is no dedicated source package or test directory.
+`README.md` documents the workflow; `keycloak.md` covers authentication. Documentation screenshots belong in `images/`. There is no dedicated source package. `journal_stats.py` holds assessment calculations; `tests/` contains offline unit tests. See `seed-assessment.md` for interpretation.
 
 ## Build, Test, and Development Commands
 
-Use Python 3.13+ as required by `pyproject.toml`; the README's 3.10+ prerequisite is outdated.
+Use Python 3.13+ as required by `pyproject.toml`.
 
 ```bash
 uv sync                                    # Install locked dependencies
@@ -32,7 +32,7 @@ Use four-space indentation, `snake_case` functions and variables, and `UPPER_SNA
 
 ## Testing Guidelines
 
-No automated test framework or coverage threshold is configured. Check syntax locally and validate infrastructure changes in a lab. For new automated tests, use `tests/test_*.py`, mock external APIs, and document the test command. Prioritize datastore paths, missing configuration, and descriptor cleanup idempotency. Confirm cleanup preserves unrelated descriptor content and never edits `-flat.vmdk` extents.
+Run `uv run python -m unittest discover -s tests -v` for offline tests using standard-library `unittest`. No coverage threshold is configured. Check syntax locally and validate infrastructure changes in a lab. Name tests `tests/test_*.py` and mock external APIs. Prioritize datastore paths, missing configuration, and descriptor cleanup idempotency. Confirm cleanup preserves unrelated descriptor content and never edits `-flat.vmdk` extents.
 
 ## Commit & Pull Request Guidelines
 
