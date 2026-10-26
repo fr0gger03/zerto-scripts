@@ -1,0 +1,43 @@
+# Repository Guidelines
+
+## Project Structure & Module Organization
+
+This repository migrates Zerto replica VMDKs into VMware Cloud Foundation or vSphere Replication seed disks. Python scripts live at the repository root and run in sequence:
+
+- `01_zerto_discover_and_export.py`: discovers replicas and exports a JSON manifest.
+- `02_vcf_seed_copy.py`: copies disks into datastore seed folders.
+- `03_vmdk_descriptor_cleanup.py`: comments out stale I/O filter references in copied descriptors.
+- `config.py`: loads environment settings, validates required variables, and computes shared datastore paths.
+
+`README.md` documents the workflow; `keycloak.md` covers authentication. Documentation screenshots belong in `images/`. There is no dedicated source package or test directory.
+
+## Build, Test, and Development Commands
+
+Use Python 3.13+ as required by `pyproject.toml`; the README's 3.10+ prerequisite is outdated.
+
+```bash
+uv sync                                    # Install locked dependencies
+cp .env.example .env                       # Initialize local settings
+uv run python -m compileall -q config.py 0*.py  # Check syntax locally
+uv run 01_zerto_discover_and_export.py      # Discover and export
+uv run 02_vcf_seed_copy.py                  # Copy disks interactively
+uv run 03_vmdk_descriptor_cleanup.py --dry-run  # Preview descriptor edits
+```
+
+Populate `.env` before connecting. Run discovery while protection is active; release Zerto locks using **Keep target disks** before copying. Cleanup follows copying. Its dry run still connects to vCenter. No build step is required.
+
+## Coding Style & Naming Conventions
+
+Use four-space indentation, `snake_case` functions and variables, and `UPPER_SNAKE_CASE` constants. Preserve numbered workflow filenames. Follow existing import grouping, add docstrings and type hints to reusable helpers, and centralize shared settings and path logic in `config.py`. Use Rich for terminal output. No formatter or linter is configured.
+
+## Testing Guidelines
+
+No automated test framework or coverage threshold is configured. Check syntax locally and validate infrastructure changes in a lab. For new automated tests, use `tests/test_*.py`, mock external APIs, and document the test command. Prioritize datastore paths, missing configuration, and descriptor cleanup idempotency. Confirm cleanup preserves unrelated descriptor content and never edits `-flat.vmdk` extents.
+
+## Commit & Pull Request Guidelines
+
+History uses short, descriptive messages such as `updated uv lock`; no strict prefix convention is established. Keep commits focused. PRs should describe behavior changes, affected workflow steps, and validation performed. Link relevant issues and include screenshots when terminal output or documentation visuals change. Update documentation and `uv.lock` alongside relevant changes.
+
+## Security & Configuration
+
+Never commit `.env`, credentials, or generated manifests containing infrastructure details. Keep `.env.example` limited to placeholders. Prefer `VERIFY_SSL=true` with trusted certificates, and preserve interactive confirmations and cleanup dry-run behavior.
