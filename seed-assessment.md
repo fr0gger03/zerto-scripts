@@ -1,8 +1,9 @@
 # Journal storage and seed suitability
 
-Script 01 helps decide whether to copy Zerto recovery disks with scripts 02–03 or
-start vSphere Replication with a fresh initial sync. Its recommendations are
-**storage screening heuristics**, not transfer estimates or measured completion times.
+Script 01 provides storage context when evaluating Zerto recovery disks as seeds
+for vSphere Replication. It does **not recommend a synchronization method** or
+predict which method is faster. Journal ratio flags describe measurements relative
+to a configured threshold; they are not transfer estimates or completion times.
 
 ## Reading the report
 
@@ -18,22 +19,22 @@ current Zerto disk paths, not the destination paths created by script 02.
 | Journal prov. | Sum of `Size.ProvisionedInBytes` for those volumes; not the configured journal hard limit |
 | Replica used / prov. | Corresponding sums for recovery volumes; excludes journal, protected/source, and scratch volumes |
 | J/R % | `journal used bytes / replica used bytes × 100` |
-| Recommendation | Policy outcome using the configured threshold |
+| Journal ratio flag | Context-only comparison with the configured threshold |
 
-The default threshold is **30%**: above it produces `FULL SYNC RECOMMENDED`;
-at or below it produces `SEED CANDIDATE`. The comparison uses unrounded values.
+The default threshold is **30%**: above it produces `ABOVE THRESHOLD`;
+at or below it produces `WITHIN THRESHOLD`. Neither flag selects a migration method. The comparison uses unrounded values.
 A displayed 30.00% can therefore exceed the threshold slightly.
 
 `UNKNOWN` means the measurements or attribution are insufficient. Missing volumes,
 missing/invalid byte fields, duplicate records, and a zero replica denominator
-prevent a recommendation. A measured zero journal usage is different from missing
+prevent a threshold classification. A measured zero journal usage is different from missing
 journal volumes. If any volume cannot be attributed to exactly one inventory VM/VPG,
-all recommendations become UNKNOWN: silently excluding its bytes could mislead.
+all flags become UNKNOWN: silently excluding its bytes could mislead.
 Complete individual metrics remain visible; incomplete totals are null in JSON.
 
-VPG ratios use **summed bytes**, not averaged VM percentages. `VMs / Full / ?`
+VPG ratios use **summed bytes**, not averaged VM percentages. `VMs / Above / ?`
 shows total VMs, VMs above the threshold, and VMs with unknown assessments. Review
-individual VMs even when the VPG aggregate is a seed candidate. Identifiers, rather
+individual VMs even when the VPG aggregate is within the threshold. Identifiers, rather
 than VM display names, distinguish workloads; VPG identifiers distinguish multiple
 protection relationships for the same VM.
 
@@ -54,13 +55,41 @@ thick provisioning can make the denominator especially misleading. Provisioned
 capacity is displayed separately and is never silently substituted for used bytes.
 The report is not an upper or lower bound on transfer size.
 
-The 30% policy is configurable and is not a Zerto or VMware performance guarantee.
+The 30% threshold is configurable and is not a Zerto or VMware performance crossover.
 Consider available bandwidth, source/target read and checksum speed, server-side
 copy duration, ongoing writes, and the time between discovery and starting the new
 replication. Re-run discovery near the decision point. Collection spans several API
 calls, not an atomic snapshot. The endpoints used do not provide a reliable journal
 history metric across versions; check configured and actual history in Zerto when
 interpreting the footprint.
+
+## Benchmark before recommending a method
+
+**If the customer has not already captured comparable workload measurements,
+thresholds and any recommendations derived from them are for context only.**
+They must be examined against the customer's environment, not treated as evidence
+that seeding or fresh synchronization will finish sooner. A low ratio does not
+prove seeding is worthwhile; a high ratio does not prove fresh sync is preferable.
+
+Before making a performance recommendation, capture:
+
+- Seed-copy time, including preparation and descriptor cleanup.
+- Seeded synchronization time, including the comparison/checksum phase.
+- Fresh initial synchronization time.
+- Bytes transferred for each method, using the same measurement boundary.
+
+Compare representative workloads under similar disk sizes and contents, source
+write rates, storage load, network bandwidth, compression settings, concurrency,
+and elapsed time between seed capture and synchronization. Record both end-to-end
+time and network traffic: the fastest method and the method using the least WAN
+bandwidth need not be the same. Document differences between trials before applying
+results to other workloads.
+
+This tool does not capture those performance benchmarks or verify that they exist.
+Even when the customer has them, the flags remain storage comparisons; the
+administrator must interpret the benchmarks alongside operational constraints and
+validate any environment-specific threshold. No threshold automatically selects or
+excludes VPGs in script 02.
 
 ## Usage and authentication
 
@@ -95,7 +124,7 @@ this change has offline tests, not certification against every Zerto release.
 - `zerto_migration_selection.json`: selected VPGs/disks and per-disk copy status,
   shared by scripts 02–03. `MIGRATION_FILE` or `--migration-file` sets its path.
 - `zerto_seed_assessment.json`: raw byte totals, VM/VPG identifiers, ratios,
-  recommendations, data-quality issues, threshold, and UTC collection timestamps.
+  journal ratio flags, data-quality issues, threshold, and UTC collection timestamps.
   Disk details are always exported, even without `--show-volume-details`.
   Schema version 2 adds `volume_details`, the disk table as structured JSON rows:
   VM/VPG identifiers and names, `volume_type` (`replica` or `journal`), datastore,
@@ -106,12 +135,18 @@ this change has offline tests, not certification against every Zerto release.
   unassigned records remain visible for troubleshooting but do not add to totals.
   A matched disk with a missing byte metric makes that aggregate metric unknown.
 
+Schema version 3 replaces the previous `recommendation` field with
+`journal_ratio_flag` and `full_sync_vm_count` with `above_threshold_vm_count`.
+The supported flags are `ABOVE THRESHOLD`, `WITHIN THRESHOLD`, and `UNKNOWN`.
+Existing reports retain their old labels until script 01 is rerun; consumers of
+the JSON should check `schema_version` and update their field references.
+
 `MANIFEST_FILE` and `ASSESSMENT_FILE` override the defaults; `--assessment-file`
 overrides the assessment path. Paths are relative to the working directory.
 Display units are GiB (`bytes / 1024³`) or MiB (`bytes / 1024²`); JSON retains bytes.
 Default artifacts are git-ignored; exclude custom output names too.
 
-Recommendations **never automatically select VPGs**. Use script 02's Questionary
+Journal ratio flags **never automatically select VPGs**. Use script 02's Questionary
 menu to keep all VPGs or choose a subset. All disks in each chosen VPG are retained;
 VPG identifiers are used when present, otherwise VPG names. With existing discovery
 files, VPG names must distinguish the groups you want to select.

@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--insecure", action="store_true", help="Bypass TLS certificate verification.")
     parser.add_argument("--threshold", type=float,
                         default=config.get_env("JOURNAL_THRESHOLD_PERCENT", "30"),
-                        help="Advisory journal-used / replica-used threshold (default: 30 percent).")
+                        help="Context-only journal-used / replica-used threshold (default: 30 percent).")
     parser.add_argument("--units", choices=("MiB", "GiB"), default="GiB")
     parser.add_argument("--show-volume-details", action="store_true",
                         help="Print the optional replica and journal VMDK table.")
@@ -124,27 +124,28 @@ def print_assessment(report: dict, units: str, *, show_volume_details: bool = Fa
     for group, title in (("vms", "Per-VM seed assessment"), ("vpgs", "Per-VPG seed assessment")):
         table = Table(title=f"{title} ({units})", header_style="bold magenta")
         table.add_column("VPG", overflow="fold")
-        table.add_column("VM" if group == "vms" else "VMs / Full / ?", overflow="fold")
+        table.add_column("VM" if group == "vms" else "VMs / Above / ?", overflow="fold")
         for label in ("Journal\nused / prov.", "Replica\nused / prov.", "J/R %"):
             table.add_column(label, justify="right", overflow="fold")
-        table.add_column("Recommendation", overflow="fold")
+        table.add_column("Journal ratio flag", overflow="fold")
         for row in report[group]:
             percent = row["journal_replica_used_percent"]
             detail = (row["vm_name"] if group == "vms" else
-                      f"{row['vm_count']} / {row['full_sync_vm_count']} / {row['unknown_vm_count']}")
+                      f"{row['vm_count']} / {row['above_threshold_vm_count']} / {row['unknown_vm_count']}")
             table.add_row(row["vpg_name"], detail,
                           f"{size(row['journal_used_bytes'])} / {size(row['journal_provisioned_bytes'])}",
                           f"{size(row['replica_used_bytes'])} / {size(row['replica_provisioned_bytes'])}",
-                          "UNKNOWN" if percent is None else f"{percent:.2f}", row["recommendation"])
+                          "UNKNOWN" if percent is None else f"{percent:.2f}", row["journal_ratio_flag"])
         console.print(table)
-    console.print(f"J/R = journal used / replica used. Above {report['threshold_percent']:g}%: full-sync heuristic.")
+    console.print(f"J/R = journal used / replica used. Threshold: {report['threshold_percent']:g}% (context only).")
     console.print("Journal storage is not unique changed bytes; compression and repeated writes affect the ratio.")
     console.print("Copied replicas omit newer journal writes. Also consider copy time, disk reads, network speed, and ongoing writes.")
-    console.print("UNKNOWN = incomplete/ambiguous data. VPG totals can mask individual VMs; Full / ? counts highlight them.")
+    console.print("UNKNOWN = incomplete/ambiguous data. VPG totals can mask individual VMs; Above / ? counts highlight them.")
     affected = sum(bool(row["issues"]) for row in report["vms"])
     if affected or report["warnings"]:
         console.print(f"[yellow]Data quality: {affected} VM(s) with issues; {len(report['warnings'])} attribution warning(s). See assessment JSON.[/yellow]")
-    console.print("Review seed-assessment.md before choosing scripts 02–03; recommendations never filter the manifest.")
+    console.print("Flags do not predict the faster method. Compare seed-copy, seeded-sync, fresh-sync times and bytes transferred.")
+    console.print("Without comparable benchmarks, treat thresholds as context only. See seed-assessment.md before selecting VPGs.")
 
 
 def main():
@@ -172,11 +173,11 @@ def main():
     finally:
         client.close()
     report = assess(vms_data, volumes_data, args.threshold)
-    report.update({"schema_version": 2, "collection_started_at": started_at,
+    report.update({"schema_version": 3, "collection_started_at": started_at,
                    "collection_finished_at": datetime.now(timezone.utc).isoformat(),
                    "threshold_percent": args.threshold, "byte_units": "bytes",
                    "ratio_basis": "journal_used_bytes / replica_used_bytes * 100",
-                   "interpretation": "Storage screening heuristic; not unique changed bytes or a transfer estimate."})
+                   "interpretation": "Context-only journal ratio flags; not unique changed bytes, a transfer estimate, or a migration-method recommendation. Comparable workload benchmarks are required to support a performance decision."})
     print_assessment(report, args.units, show_volume_details=args.show_volume_details)
 
     # 3. Build Lookup Maps
@@ -296,7 +297,7 @@ def main():
         f"\n[bold green]✔ Manifest exported successfully to:[/bold green] [bold white]{manifest_path}[/bold white]"
     )
     console.print(
-        f"Assessment saved to {assessment_path}. Review recommendations before unprotecting any VPG.\n"
+        f"Assessment saved to {assessment_path}. Review storage context before selecting or unprotecting any VPG.\n"
         "For selected workloads only: keep target disks when unprotecting, then run scripts 02–03."
     )
 

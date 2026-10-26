@@ -37,12 +37,12 @@ def byte_value(value) -> int | None:
     return None
 
 
-def recommendation(used: int | None, replica: int | None, threshold: float) -> tuple[float | None, str]:
-    """Return the unrounded storage ratio and configured screening outcome."""
+def ratio_flag(used: int | None, replica: int | None, threshold: float) -> tuple[float | None, str]:
+    """Return the unrounded storage ratio and contextual threshold flag."""
     if used is None or replica is None or replica <= 0:
         return None, "UNKNOWN"
     ratio = used / replica * 100
-    return ratio, ("FULL SYNC RECOMMENDED" if ratio > threshold else "SEED CANDIDATE")
+    return ratio, ("ABOVE THRESHOLD" if ratio > threshold else "WITHIN THRESHOLD")
 
 
 def volume_detail(volume: dict, kind: str) -> dict:
@@ -77,7 +77,7 @@ def assess(vms: list, volumes: list, threshold: float) -> dict:
 
     VM identifiers can recur across VPGs. Volume membership must resolve to
     exactly one inventory entry; ambiguous or unassigned data invalidates
-    recommendations rather than silently understating totals.
+    flags rather than silently understating totals.
     """
     rows = {}
     warnings = []
@@ -155,13 +155,13 @@ def assess(vms: list, volumes: list, threshold: float) -> dict:
                 row[f"{prefix}_{field}_bytes"] = total
                 if sizes and total is None:
                     row["issues"].append(f"Incomplete {prefix} {field} bytes")
-        row["journal_replica_used_percent"], row["recommendation"] = recommendation(
+        row["journal_replica_used_percent"], row["journal_ratio_flag"] = ratio_flag(
             row["journal_used_bytes"], row["replica_used_bytes"], threshold)
         if unassigned or row["issues"]:
-            row["recommendation"] = "UNKNOWN"
+            row["journal_ratio_flag"] = "UNKNOWN"
         if not row["vpg_identifier"] and row["vpg_name"] == "Unknown_VPG":
             row["issues"].append("Missing VPG identity")
-            row["recommendation"] = "UNKNOWN"
+            row["journal_ratio_flag"] = "UNKNOWN"
         vm_rows.append(row)
 
     groups = defaultdict(list)
@@ -171,15 +171,15 @@ def assess(vms: list, volumes: list, threshold: float) -> dict:
     for members in groups.values():
         identifier, name = members[0]["vpg_identifier"], members[0]["vpg_name"]
         row = {"vpg_identifier": identifier, "vpg_name": name, "vm_count": len(members),
-               "unknown_vm_count": sum(m["recommendation"] == "UNKNOWN" for m in members),
-               "full_sync_vm_count": sum(m["recommendation"] == "FULL SYNC RECOMMENDED" for m in members)}
+               "unknown_vm_count": sum(m["journal_ratio_flag"] == "UNKNOWN" for m in members),
+               "above_threshold_vm_count": sum(m["journal_ratio_flag"] == "ABOVE THRESHOLD" for m in members)}
         for metric in METRICS:
             values = [m[metric] for m in members]
             row[metric] = sum(values) if all(v is not None for v in values) else None
-        row["journal_replica_used_percent"], row["recommendation"] = recommendation(
+        row["journal_replica_used_percent"], row["journal_ratio_flag"] = ratio_flag(
             row["journal_used_bytes"], row["replica_used_bytes"], threshold)
         if row["unknown_vm_count"]:
-            row["recommendation"] = "UNKNOWN"
+            row["journal_ratio_flag"] = "UNKNOWN"
         vpg_rows.append(row)
     volume_details.sort(key=lambda disk: (
         disk["vpg_name"], disk["vpg_identifier"] or "", disk["vm_name"],

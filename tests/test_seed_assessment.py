@@ -40,23 +40,23 @@ class AssessmentTests(unittest.TestCase):
         self.assertEqual(row["journal_used_bytes"], 30)
         self.assertEqual(row["journal_provisioned_bytes"], 200)
         self.assertEqual(row["journal_replica_used_percent"], 30)
-        self.assertEqual(row["recommendation"], "SEED CANDIDATE")
+        self.assertEqual(row["journal_ratio_flag"], "WITHIN THRESHOLD")
         self.assertEqual(volume_type({"volumeType": "1"}), "recovery")
         self.assertEqual(get_val({"OwningVM": 1}, "owningVm"), 1)
 
     def test_threshold_and_zero_journal(self):
-        for used, expected in ((0, "SEED CANDIDATE"), (30, "SEED CANDIDATE"),
-                               (31, "FULL SYNC RECOMMENDED")):
+        for used, expected in ((0, "WITHIN THRESHOLD"), (30, "WITHIN THRESHOLD"),
+                               (31, "ABOVE THRESHOLD")):
             with self.subTest(used=used):
                 row = assess([vm()], [vol("Journal", used), vol("Recovery", 100)], 30)["vms"][0]
-                self.assertEqual(row["recommendation"], expected)
+                self.assertEqual(row["journal_ratio_flag"], expected)
 
     def test_missing_invalid_and_zero_denominator(self):
         for value in (None, -1, True, 2.5):
             with self.subTest(value=value):
                 result = assess([vm()], [vol("Journal", value), vol("Recovery", 100)], 30)
                 self.assertIsNone(result["vms"][0]["journal_used_bytes"])
-                self.assertEqual(result["vpgs"][0]["recommendation"], "UNKNOWN")
+                self.assertEqual(result["vpgs"][0]["journal_ratio_flag"], "UNKNOWN")
         row = assess([vm()], [vol("Journal"), vol("Recovery", 0)], 30)["vms"][0]
         self.assertIsNone(row["journal_replica_used_percent"])
 
@@ -64,7 +64,7 @@ class AssessmentTests(unittest.TestCase):
         result = assess([vm()], [], 30)
         self.assertEqual(len(result["vms"]), 1)
         self.assertIsNone(result["vms"][0]["journal_used_bytes"])
-        self.assertEqual(result["vms"][0]["recommendation"], "UNKNOWN")
+        self.assertEqual(result["vms"][0]["journal_ratio_flag"], "UNKNOWN")
 
     def test_partial_metric_is_unknown(self):
         result = assess([vm()], [vol(2, 20), vol(2, None), vol(1, 100)], 30)
@@ -75,8 +75,8 @@ class AssessmentTests(unittest.TestCase):
         result = assess([vm(), vm("vm-2")], volumes, 30)
         group = result["vpgs"][0]
         self.assertEqual(group["journal_replica_used_percent"], 6)
-        self.assertEqual(group["full_sync_vm_count"], 1)
-        self.assertEqual(group["recommendation"], "SEED CANDIDATE")
+        self.assertEqual(group["above_threshold_vm_count"], 1)
+        self.assertEqual(group["journal_ratio_flag"], "WITHIN THRESHOLD")
 
     def test_duplicate_names_and_multiple_vpgs(self):
         volumes = [vol(2), vol(1, 100), vol(2, 60, vpg="group-2"), vol(1, 100, vpg="group-2")]
@@ -91,13 +91,13 @@ class AssessmentTests(unittest.TestCase):
         self.assertTrue(result["warnings"])
         orphan = vol(2, identifier="missing")
         result = assess([vm()], [vol(2), vol(1, 100), orphan], 30)
-        self.assertEqual(result["vms"][0]["recommendation"], "UNKNOWN")
+        self.assertEqual(result["vms"][0]["journal_ratio_flag"], "UNKNOWN")
 
     def test_duplicate_physical_volume(self):
         journal = vol(2, path="[DS] journal/disk.vmdk")
         row = assess([vm()], [journal, journal, vol(1, 100)], 30)["vms"][0]
         self.assertEqual(row["journal_used_bytes"], 30)
-        self.assertEqual(row["recommendation"], "UNKNOWN")
+        self.assertEqual(row["journal_ratio_flag"], "UNKNOWN")
 
     def test_vpg_identifier_controls_grouping_even_if_names_differ(self):
         second = vm("vm-2")
@@ -112,13 +112,13 @@ class AssessmentTests(unittest.TestCase):
         inventory.pop("VpgIdentifier")
         result = assess([inventory], [vol(2), vol(1, 100)], 30)
         self.assertEqual(result["vms"][0]["vpg_identifier"], "group-1")
-        self.assertEqual(result["vms"][0]["recommendation"], "SEED CANDIDATE")
+        self.assertEqual(result["vms"][0]["journal_ratio_flag"], "WITHIN THRESHOLD")
 
     def test_custom_threshold_and_int64_byte_counts(self):
         row = assess([vm()], [vol(2, 40 * 1024**3), vol(1, 100 * 1024**3)], 40)["vms"][0]
         self.assertEqual(row["journal_used_bytes"], 40 * 1024**3)
         self.assertEqual(row["journal_replica_used_percent"], 40)
-        self.assertEqual(row["recommendation"], "SEED CANDIDATE")
+        self.assertEqual(row["journal_ratio_flag"], "WITHIN THRESHOLD")
 
     def test_incomplete_member_invalidates_vpg_total(self):
         result = assess([vm(), vm("vm-2")], [vol(2), vol(1, 100), vol(1, 100, identifier="vm-2")], 30)
@@ -283,11 +283,19 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(len(disks), 1)
             self.assertEqual(set(disks[0]), {"vm_name", "vpg_name", "datastore", "source_raw_path", "ui_display_path", "destination_seed_path"})
             self.assertEqual(disks[0]["destination_seed_path"], "[DS] VM/disk.vmdk")
-            self.assertEqual(report["vms"][0]["recommendation"], "SEED CANDIDATE")
-            self.assertEqual(report["schema_version"], 2)
+            self.assertEqual(report["vms"][0]["journal_ratio_flag"], "WITHIN THRESHOLD")
+            self.assertEqual(report["schema_version"], 3)
             self.assertEqual(len(report["volume_details"]), 2)
             self.assertEqual(report["volume_details"][0]["vmdk_path"], "[DS] folder/disk.vmdk")
             self.assertIn("not unique changed bytes", output.getvalue())
+            self.assertIn("context only", output.getvalue())
+            self.assertIn("Flags do not predict the faster method", output.getvalue())
+            self.assertNotIn("FULL SYNC RECOMMENDED", output.getvalue())
+            self.assertNotIn("SEED CANDIDATE", output.getvalue())
+            for row in report["vms"] + report["vpgs"]:
+                self.assertNotIn("recommendation", row)
+                self.assertIn("journal_ratio_flag", row)
+            self.assertNotIn("full_sync_vm_count", report["vpgs"][0])
             client.close.assert_called_once()
 
 

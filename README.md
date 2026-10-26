@@ -75,7 +75,7 @@ committed template containing placeholders only.
 | `ZVM_IP` | Script 1 | Zerto ZVM IP or FQDN (no scheme or port) |
 | `ZVM_AUTH_MODE` / `ZVM_PORT` | Script 1 | Optional. `oauth` (443, default) or `legacy` (9669); port can be overridden |
 | `ZVM_USER` / `ZVM_PASSWORD` | Script 1 | Credentials required only in legacy mode |
-| `JOURNAL_THRESHOLD_PERCENT` | Script 1 | Optional. Screening threshold, default `30` |
+| `JOURNAL_THRESHOLD_PERCENT` | Script 1 | Optional. Context-only journal ratio threshold, default `30` |
 | `ASSESSMENT_FILE` | Script 1 | Optional. Assessment JSON, default `zerto_seed_assessment.json` |
 | `ZVM_CLIENT_ID` | Script 1 | Keycloak OAuth client ID (see [keycloak.md](keycloak.md)) |
 | `ZVM_CLIENT_SECRET` | Script 1 | Keycloak OAuth client secret |
@@ -137,9 +137,13 @@ uv run 01_zerto_discover_and_export.py
 
 3. Review the per-VM and per-VPG journal assessment before deciding to proceed.
    The default policy flags journal-used / replica-used ratios above 30% as
-   `FULL SYNC RECOMMENDED`; missing or ambiguous measurements are `UNKNOWN`.
-   This is a storage heuristic, not a transfer estimate. See the
-   [decision guidance](seed-assessment.md) for interpretation and limitations.
+   `ABOVE THRESHOLD`; ratios at or below it are `WITHIN THRESHOLD`, and missing
+   or ambiguous measurements are `UNKNOWN`. These flags do not recommend a
+   synchronization method. Without measurements of seed-copy time, seeded-sync
+   time, fresh-sync time, and bytes transferred under comparable conditions,
+   thresholds and any migration recommendations are **context only** and require
+   examination for the customer's environment. See the
+   [decision guidance and benchmarking requirements](seed-assessment.md#benchmark-before-recommending-a-method).
 
 ```bash
 # Optional: use a 40% threshold and display MiB instead of GiB
@@ -149,7 +153,7 @@ uv run 01_zerto_discover_and_export.py --threshold 40 --units MiB
 4. Inspect `zerto_seed_assessment.json` and `zerto_seeds_manifest.json`.
    Add `--show-volume-details` to print the optional replica/journal VMDK table.
    Paths and individual sizes are always saved in the assessment's `volume_details` rows.
-   Recommendations remain advisory. Choose migration VPGs with script 02:
+   Ratio flags do not select workloads. Choose migration VPGs with script 02:
 
 ```bash
 # Optional: select VPGs now, without connecting to vCenter or copying
@@ -212,7 +216,7 @@ or set `MIGRATION_FILE` in `.env`, to use a different selection file.
 
 ### Step 4: Clean Up Lingering I/O Filter References
 
-If the original Zerto replica had an I/O filter attached (e.g. `vmwarelwd`), the
+If the original Zerto replica had an I/O filter attached (e.g. `hpereplication`), the
 copied seed disk's descriptor can retain `ddb.iofilters` / `ddb.sidecars` lines
 that reference sidecar files no longer present on the target. Left in place,
 these can cause the eventual VM to fail to power on with an error like
