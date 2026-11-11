@@ -6,12 +6,14 @@ from pathlib import Path
 import ssl
 import sys
 
-from pyvim.connect import Disconnect, SmartConnect
+import requests
+from pyVim.connect import Disconnect, SmartConnect
 from pyVmomi import vim
 from rich.console import Console
 from rich.prompt import Confirm
 
 import config
+from descriptor_cleanup import build_datastore_url, clean_source_descriptor
 from migration_selection import choose_disks, create_plan, load_plan, save_plan, validate_disks
 
 MANIFEST_FILE = config.MANIFEST_FILE
@@ -33,13 +35,17 @@ def wait_for_task(task):
 def main():
     console.rule("[bold cyan]vSphere Datastore Seed Copier")
 
-    parser = argparse.ArgumentParser(description="Choose VPGs, save a migration plan, and copy seed disks.")
+    parser = argparse.ArgumentParser(description="Choose VPGs, clean source descriptors, and copy seed disks.")
     parser.add_argument("--migration-file", default=config.MIGRATION_FILE,
-                        help="Shared migration selection JSON used by scripts 02 and 03.")
+                        help="Migration selection JSON with cleanup and copy results.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Connect to vCenter and preview source cleanup/copies without remote writes.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--select-only", action="store_true", help="Save VPG selection without connecting to vCenter.")
     mode.add_argument("--reuse-selection", action="store_true", help="Copy pending/skipped/failed disks from a saved selection.")
     args = parser.parse_args()
+    if args.select_only and args.dry_run:
+        parser.error("--select-only cannot be combined with --dry-run")
     try:
         if Path(args.migration_file).resolve() == Path(MANIFEST_FILE).resolve():
             raise ValueError("Migration output must differ from the discovery manifest")
@@ -65,7 +71,7 @@ def main():
             save_plan(plan, args.migration_file)
         manifest = [disk for disk in plan["disks"] if disk["copy_status"] != "copied"]
         console.print(f"Migration selection: {args.migration_file} ({len(plan['disks'])} disk(s), "
-                      f"{len(manifest)} remaining). Script 03 uses this same file.")
+                      f"{len(manifest)} remaining).")
         if args.select_only:
             console.print("Selection saved. Keep target disks when unprotecting selected VPGs, "
                           "then rerun with --reuse-selection.")
@@ -82,6 +88,20 @@ def main():
     VCENTER_USER = env["VCENTER_USER"]
     VCENTER_PASSWORD = env["VCENTER_PASSWORD"]
     DATACENTER_NAME = env["VCENTER_DATACENTER"]
+
+    if args.dry_run:
+        console.print("[yellow]Dry run: reads source descriptors; no remote writes or copy tasks.[/yellow]")
+    else:
+        console.print(
+            "[bold yellow]Source descriptors will be edited in place without separate backups. "
+            "Original filter assignments are retained as comments.[/bold yellow]"
+        )
+        if not Confirm.ask(
+            "Have you unprotected the selected workloads using Keep target disks, "
+            "released their locks, and approved source cleanup?", default=False
+        ):
+            console.print("[yellow]No source cleanup or copy started.[/yellow]")
+            return
 
     # 2. Connect to vCenter
     console.print(f"[bold green]Connecting to vCenter {VCENTER_IP}...[/bold green]")
@@ -101,7 +121,9 @@ def main():
         console.print(f"[bold red]Failed to connect to vCenter:[/bold red] {e}")
         exit(1)
 
+    session = requests.Session()
     try:
+        session.headers.update({"Cookie": si._stub.cookie})
         content = si.RetrieveContent()
         file_mgr = content.fileManager
         vdisk_mgr = content.virtualDiskManager
@@ -122,9 +144,8 @@ def main():
             ds_name = item["datastore"]
             vm_name = item["vm_name"]
 
-            # Shared with 03_vmdk_descriptor_cleanup.py so both scripts agree
-            # on exactly where the seed disk ends up.
-            src_raw_path, dest_folder_path, dest_vmdk_path, vmdk_filename = (
+            # Use the same normalized source for descriptor cleanup and copying.
+            src_raw_path, dest_folder_path, dest_vmdk_path, _vmdk_filename = (
                 config.compute_dest_paths(ds_name, vm_name, item["source_raw_path"])
             )
 
@@ -134,8 +155,32 @@ def main():
             console.print(f"  [cyan]Target Folder Path:[/cyan] {dest_folder_path}")
             console.print(f"  [cyan]Destination Seed:[/cyan]  {dest_vmdk_path}")
 
-            if Confirm.ask(f"Copy seed VMDK for [bold green]{vm_name}[/bold green]?"):
-                
+            action = "Preview cleanup and copy" if args.dry_run else "Clean source descriptor and copy"
+            if Confirm.ask(f"{action} for [bold green]{vm_name}[/bold green]?"):
+                try:
+                    url = build_datastore_url(
+                        VCENTER_IP, DATACENTER_NAME, ds_name, src_raw_path
+                    )
+                    cleanup_status, changed = clean_source_descriptor(
+                        session, url, VERIFY_SSL, dry_run=args.dry_run
+                    )
+                except (requests.RequestException, ValueError, UnicodeError) as exc:
+                    console.print(f"Source cleanup failed for {vm_name}: {exc}", style="red", markup=False)
+                    if not args.dry_run:
+                        item["cleanup_status"] = "failed"
+                        item["cleanup_error"] = str(exc)
+                        item["copy_status"] = "failed"
+                        save_plan(plan, args.migration_file)
+                    continue
+                console.print(f"  Source descriptor: {cleanup_status}; {len(changed)} assignment(s).")
+                for line in changed:
+                    console.print(f"    - {line}\n    + #{line}", markup=False)
+                if args.dry_run:
+                    console.print("  Would copy the cleaned source to the destination; no changes written.")
+                    continue
+                item["cleanup_status"] = cleanup_status
+                item.pop("cleanup_error", None)
+                save_plan(plan, args.migration_file)
                 # --- STEP A: Create Folder using Key/Value Keyword Arguments ---
                 console.print(f"  [dim]Creating folder: {dest_folder_path}[/dim]")
                 try:
@@ -172,11 +217,13 @@ def main():
                 if success:
                     console.print(f"[bold green]✔ Successfully copied seed VMDK for {vm_name}![/bold green]")
             else:
-                item["copy_status"] = "skipped"
-                save_plan(plan, args.migration_file)
+                if not args.dry_run:
+                    item["copy_status"] = "skipped"
+                    save_plan(plan, args.migration_file)
                 console.print(f"[yellow]Skipped copy for {vm_name}.[/yellow]")
 
     finally:
+        session.close()
         Disconnect(si)
         console.print("\n[bold blue]Disconnected from vCenter. Execution complete.[/bold blue]\n")
 

@@ -1,6 +1,7 @@
 """Offline selection, copy-result persistence, and cleanup scope tests."""
 
 import importlib.util
+from contextlib import ExitStack
 import io
 import json
 from pathlib import Path
@@ -27,7 +28,6 @@ def load_script(name, filename):
 
 
 copier = load_script("copier", "02_vcf_seed_copy.py")
-cleanup = load_script("cleanup", "03_vmdk_descriptor_cleanup.py")
 
 
 def disk(vpg="first", vm="vm-1", filename="disk.vmdk", **extra):
@@ -37,6 +37,7 @@ def disk(vpg="first", vm="vm-1", filename="disk.vmdk", **extra):
 
 def fake_connection(module):
     si = MagicMock()
+    si._stub.cookie = 'vmware_soap_session="offline-test"'
     datacenter = MagicMock(spec=module.vim.Datacenter)
     datacenter.name = "DC"
     si.RetrieveContent.return_value.rootFolder.childEntity = [datacenter]
@@ -120,6 +121,159 @@ class WorkflowTests(unittest.TestCase):
             connect.assert_not_called()
             self.assertEqual(len(selection.load_plan(str(target))["disks"]), 1)
 
+    def run_saved_plan(self, disks, *, prompts=None, outcomes=None, dry_run=False):
+        """Run only against mocks and return durable results plus API call history."""
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            path = Path(directory) / "migration.json"
+            plan = selection.create_plan(disks, "source.json")
+            for item, source in zip(plan["disks"], disks):
+                item["copy_status"] = source.get("copy_status", "pending")
+            selection.save_plan(plan, str(path))
+            original = path.read_bytes()
+            si = fake_connection(copier)
+            events = []
+
+            def clean(*args, **kwargs):
+                events.append("cleanup")
+                result = next(results)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            results = iter(outcomes or [("clean", [])] * len(disks))
+            si.RetrieveContent.return_value.fileManager.MakeDirectory.side_effect = (
+                lambda **kwargs: events.append("mkdir")
+            )
+            si.RetrieveContent.return_value.virtualDiskManager.CopyVirtualDisk_Task.side_effect = (
+                lambda **kwargs: events.append("copy")
+            )
+            argv = ["copy", "--reuse-selection", "--migration-file", str(path)]
+            if dry_run:
+                argv.append("--dry-run")
+            stack.enter_context(patch("sys.argv", argv))
+            stack.enter_context(patch.object(copier.config, "require", return_value=ENV))
+            connect = stack.enter_context(patch.object(copier, "SmartConnect", return_value=si))
+            stack.enter_context(patch.object(copier, "Disconnect"))
+            session = stack.enter_context(patch.object(copier.requests, "Session")).return_value
+            stack.enter_context(patch.object(copier, "console", Console(file=io.StringIO())))
+            stack.enter_context(patch.object(copier.Confirm, "ask", side_effect=prompts or [True] * (len(disks) + 1)))
+            cleaner = stack.enter_context(patch.object(copier, "clean_source_descriptor", side_effect=clean))
+            stack.enter_context(patch.object(copier, "wait_for_task", return_value=True))
+            copier.main()
+            if dry_run:
+                self.assertEqual(path.read_bytes(), original)
+            return selection.load_plan(str(path)), events, cleaner, connect, session
+
+    def test_cleanup_precedes_folder_and_copy_using_source_url(self):
+        result, events, clean, _, session = self.run_saved_plan([disk()])
+        self.assertEqual(events, ["cleanup", "mkdir", "copy"])
+        self.assertIn("/folder/replica/disk.vmdk?", clean.call_args.args[1])
+        self.assertEqual(result["disks"][0]["cleanup_status"], "clean")
+        session.close.assert_called_once()
+
+    def test_cleanup_failure_continues_without_copying_failed_disk(self):
+        result, events, _, _, _ = self.run_saved_plan(
+            [disk(filename="bad.vmdk"), disk(filename="good.vmdk")],
+            outcomes=[ValueError("read-back mismatch"), ("cleaned", ['ddb.iofilters = "filter"'])],
+        )
+        self.assertEqual(events, ["cleanup", "cleanup", "mkdir", "copy"])
+        self.assertEqual([d["copy_status"] for d in result["disks"]], ["failed", "copied"])
+        self.assertEqual(result["disks"][0]["cleanup_error"], "read-back mismatch")
+
+    def test_declined_and_completed_disks_are_not_cleaned(self):
+        result, events, clean, _, _ = self.run_saved_plan(
+            [disk(copy_status="copied"), disk(filename="declined.vmdk")],
+            prompts=[True, False],
+        )
+        self.assertEqual(events, [])
+        clean.assert_not_called()
+        self.assertEqual([d["copy_status"] for d in result["disks"]], ["copied", "skipped"])
+
+    def test_unprotect_confirmation_declined_does_not_connect(self):
+        _, events, clean, connect, _ = self.run_saved_plan([disk()], prompts=[False])
+        self.assertEqual(events, [])
+        clean.assert_not_called()
+        connect.assert_not_called()
+
+    def test_dry_run_keeps_saved_results_and_does_not_copy(self):
+        _, events, clean, _, _ = self.run_saved_plan(
+            [disk()], dry_run=True, outcomes=[("would_clean", ['ddb.sidecars = "stale"'])],
+        )
+        self.assertEqual(events, ["cleanup"])
+        self.assertTrue(clean.call_args.kwargs["dry_run"])
+
+    def test_dry_run_does_not_mark_declined_disk_skipped(self):
+        result, events, clean, _, _ = self.run_saved_plan(
+            [disk()], dry_run=True, prompts=[False],
+        )
+        self.assertEqual(result["disks"][0]["copy_status"], "pending")
+        self.assertEqual(events, [])
+        clean.assert_not_called()
+
+    def test_select_only_and_dry_run_are_mutually_exclusive(self):
+        with patch("sys.argv", ["copy", "--select-only", "--dry-run"]), \
+             patch("sys.stderr", io.StringIO()), \
+             patch.object(copier, "SmartConnect") as connect, \
+             patch.object(copier, "console", Console(file=io.StringIO())):
+            with self.assertRaises(SystemExit):
+                copier.main()
+        connect.assert_not_called()
+
+    def test_dry_run_failure_keeps_saved_results(self):
+        _, events, _, _, _ = self.run_saved_plan(
+            [disk()], dry_run=True, outcomes=[ValueError("missing")],
+        )
+        self.assertEqual(events, ["cleanup"])
+
+    def test_retry_rechecks_cleanup_and_clears_previous_error(self):
+        result, events, _, _, _ = self.run_saved_plan([
+            disk(copy_status="failed", cleanup_status="failed", cleanup_error="old error")
+        ])
+        self.assertEqual(events, ["cleanup", "mkdir", "copy"])
+        self.assertNotIn("cleanup_error", result["disks"][0])
+        self.assertEqual(result["disks"][0]["copy_status"], "copied")
+
+    def test_malformed_source_is_failed_before_http_or_copy(self):
+        result, events, clean, _, _ = self.run_saved_plan([
+            disk(source_raw_path="[WRONG] replica/disk.vmdk")
+        ])
+        self.assertEqual(events, [])
+        clean.assert_not_called()
+        self.assertEqual(result["disks"][0]["copy_status"], "failed")
+
+    def test_unqualified_source_is_normalized_before_cleanup(self):
+        _, events, clean, _, _ = self.run_saved_plan([
+            disk(source_raw_path="uuid/replica/disk.vmdk")
+        ])
+        self.assertEqual(events, ["cleanup", "mkdir", "copy"])
+        self.assertIn("/folder/uuid/replica/disk.vmdk?", clean.call_args.args[1])
+
+    def test_datastore_root_descriptor_has_correct_destination(self):
+        self.assertEqual(config.compute_dest_paths("DS", "VM", "[DS] disk.vmdk"), (
+            "[DS] disk.vmdk", "[DS] VM", "[DS] VM/disk.vmdk", "disk.vmdk",
+        ))
+
+    def test_subset_cleans_only_questionary_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.json"
+            source.write_text(json.dumps([disk(), disk("unselected", filename="excluded.vmdk")]))
+            target = Path(directory) / "migration.json"
+            si = fake_connection(copier)
+            with patch("sys.argv", ["copy", "--migration-file", str(target)]), \
+                 patch.object(copier, "MANIFEST_FILE", str(source)), \
+                 patch.object(copier, "choose_disks", return_value=[disk()]), \
+                 patch.object(copier.config, "require", return_value=ENV), \
+                 patch.object(copier, "SmartConnect", return_value=si), \
+                 patch.object(copier, "Disconnect"), \
+                 patch.object(copier.Confirm, "ask", return_value=True), \
+                 patch.object(copier, "clean_source_descriptor", return_value=("clean", [])) as clean, \
+                 patch.object(copier, "wait_for_task", return_value=True), \
+                 patch.object(copier, "console", Console(file=io.StringIO())):
+                copier.main()
+            clean.assert_called_once()
+            self.assertNotIn("excluded", clean.call_args.args[1])
+            self.assertEqual(len(selection.load_plan(str(target))["disks"]), 1)
+
     def test_cancellation_preserves_previous_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.json"
@@ -146,42 +300,26 @@ class WorkflowTests(unittest.TestCase):
                  patch.object(copier.config, "require", return_value=ENV), \
                  patch.object(copier, "SmartConnect", return_value=si), \
                  patch.object(copier, "Disconnect") as disconnect, \
-                 patch.object(copier.Confirm, "ask", side_effect=[True, False, True]), \
+                 patch.object(copier.Confirm, "ask", side_effect=[True, True, False, True]), \
+                 patch.object(copier, "clean_source_descriptor", return_value=("clean", [])) as clean, \
                  patch.object(copier, "wait_for_task", side_effect=[True, False]), \
                  patch.object(copier, "console", Console(file=io.StringIO())):
                 copier.main()
             statuses = [d["copy_status"] for d in selection.load_plan(str(path))["disks"]]
             self.assertEqual(statuses, ["copied", "copied", "skipped", "failed"])
             self.assertEqual(si.RetrieveContent.return_value.virtualDiskManager.CopyVirtualDisk_Task.call_count, 2)
+            self.assertEqual(clean.call_count, 2)
+            self.assertEqual(selection.load_plan(str(path))["disks"][3]["cleanup_status"], "clean")
             disconnect.assert_called_once_with(si)
-
-    def test_cleanup_only_reads_successfully_copied_selection(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "migration.json"
-            plan = selection.create_plan([disk(vm=f"vm-{i}", filename=f"{i}.vmdk") for i in range(4)], "source.json")
-            for item, status in zip(plan["disks"], ("copied", "pending", "skipped", "failed")):
-                item["copy_status"] = status
-            selection.save_plan(plan, str(path))
-            si = fake_connection(cleanup)
-            with patch("sys.argv", ["cleanup", "--dry-run", "--migration-file", str(path)]), \
-                 patch.object(cleanup, "SmartConnect", return_value=si), \
-                 patch.object(cleanup, "Disconnect"), \
-                 patch.object(cleanup, "fetch_descriptor", return_value='ddb.iofilters = "filter"\n') as fetch, \
-                 patch.object(cleanup, "upload_descriptor") as upload, \
-                 patch.object(cleanup, "console", Console(file=io.StringIO())):
-                cleanup.main()
-            fetch.assert_called_once()
-            self.assertIn("vm-0/0.vmdk", fetch.call_args.args[1])
-            upload.assert_not_called()
 
     def test_missing_selection_does_not_fall_back_to_discovery(self):
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / "missing.json"
-            with patch("sys.argv", ["cleanup", "--migration-file", str(missing)]), \
-                 patch.object(cleanup, "SmartConnect") as connect, \
-                 patch.object(cleanup, "console", Console(file=io.StringIO())):
+            with patch("sys.argv", ["copy", "--reuse-selection", "--migration-file", str(missing)]), \
+                 patch.object(copier, "SmartConnect") as connect, \
+                 patch.object(copier, "console", Console(file=io.StringIO())):
                 with self.assertRaises(SystemExit):
-                    cleanup.main()
+                    copier.main()
             connect.assert_not_called()
 
 

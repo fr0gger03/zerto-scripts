@@ -20,13 +20,9 @@ Copying Zerto target disks into standard datastore folders (`[Datastore] VM_Name
                │
                ▼
 ┌────────────────────────────────┐
-│ 3. Execute vSphere Seed Copy   │ ──► Run 02_vcf_seed_copy.py
-└────────────────────────────────┘     Server-side VMDK copy on vSAN/VMFS
-               │
-               ▼
-┌────────────────────────────────┐
-│ 4. Clean I/O Filter References │ ──► Run 03_vmdk_descriptor_cleanup.py
-└────────────────────────────────┘     Comments out stale ddb.iofilters/ddb.sidecars
+│ 3. Clean Source & Copy Seeds   │ ──► Run 02_vcf_seed_copy.py
+└────────────────────────────────┘     Comment source filter references, verify,
+                                       then server-side VMDK copy on vSAN/VMFS
 
 ```
 
@@ -43,16 +39,59 @@ Copying Zerto target disks into standard datastore folders (`[Datastore] VM_Name
 
 ### Installation
 
-Install dependencies using `uv` or `pip`:
+Use the committed `requirements.txt` to install the same locked versions and
+hashes on either laptop. `uv.lock` remains the authoritative resolution, but
+contains corporate Artifactory download URLs; normal `uv sync` is therefore not
+the portable installation path.
 
 ```bash
-# Using uv (recommended)
-uv sync
+# Create the environment once per checkout (skip if .venv already exists).
+uv venv --python 3.13
 
-# Or standard pip
-pip install requests pyvmomi rich python-dotenv questionary
+# Personal laptop: public PyPI, no corporate VPN needed.
+uv pip sync --python .venv/bin/python --require-hashes requirements.txt --default-index https://pypi.org/simple
 
+# Corporate laptop: connect the VPN first and use Artifactory.
+uv pip sync --python .venv/bin/python --require-hashes requirements.txt --default-index https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi-virtual/simple
 ```
+
+Run **only the sync command appropriate to the laptop**. Re-run it after pulling
+dependency changes. `uv pip sync` makes `.venv` match the requirements exactly,
+removing extraneous packages; it does not rewrite `uv.lock`. No activation is
+required because the target interpreter is explicit. Keep any index credentials
+in your existing local credential setup, not in committed files or URLs.
+
+These commands assume no additional private indexes are configured with higher
+priority. `--default-index` selects the default, but does not remove extra indexes;
+keep each laptop's local uv configuration limited to its permitted sources.
+Both indexes must serve artifacts matching the exported hashes. If verification
+fails, investigate the mirror/package difference rather than disabling hashes.
+
+Use **`uv run --no-sync` for all scripts and tests**, as shown below. This runs
+the installed environment without automatically resolving/syncing against the
+corporate URLs. It does not check for missing or outdated dependencies; install
+from `requirements.txt` first. `.venv` stays local and is never copied between laptops.
+
+#### Updating dependencies
+
+Resolve intended dependency changes on the VPN-connected corporate laptop,
+then export the lock for installation on both laptops:
+
+```bash
+# After editing dependency declarations in pyproject.toml:
+uv lock
+uv export --frozen --no-emit-project --output-file requirements.txt
+```
+
+Review and commit `pyproject.toml`, `uv.lock`, and `requirements.txt` together
+when they change. Do not edit `requirements.txt` manually or regenerate the lock
+just to switch indexes. The export uses the existing lock without contacting an
+index, preserves exact versions and hashes, and omits index/download URLs.
+
+Offline tests check that the requirements still match the lock. Exporting with
+`--frozen` does not check whether `pyproject.toml` has changed, so run `uv lock`
+first when actually changing dependencies. The corporate resolution step still
+requires the VPN; ordinary installs here do not.
 
 ---
 
@@ -84,11 +123,11 @@ committed template containing placeholders only.
 | `VCENTER_PASSWORD` | Script 2 | vCenter account password |
 | `VCENTER_DATACENTER` | Script 2 | vCenter Datacenter object name |
 | `MANIFEST_FILE` | Scripts 1–2 | Optional. Discovery manifest (default `zerto_seeds_manifest.json`) |
-| `MIGRATION_FILE` | Scripts 2–3 | Optional. Selected migration disks and copy results (default `zerto_migration_selection.json`) |
+| `MIGRATION_FILE` | Script 2 | Optional. Selected migration disks and cleanup/copy results (default `zerto_migration_selection.json`) |
 | `VERIFY_SSL` | Both | Optional. `true` to enforce TLS verification (default `false` for self-signed certs) |
 
 Environment variables exported in your shell (or injected by a secret manager
-such as `op run --env-file=.env -- uv run ...`) take precedence over the `.env` file,
+such as `op run --env-file=.env -- uv run --no-sync ...`) take precedence over the `.env` file,
 so credentials never have to touch disk if you prefer.
 
 Both scripts fail fast with a clear message listing every missing variable.
@@ -98,10 +137,11 @@ Both scripts fail fast with a clear message listing every missing variable.
 ## Repository Structure
 
 * `01_zerto_discover_and_export.py` — Connects to Zerto ZVMA REST API, maps protected VMs to target ESXi hosts/VRAs, displays a formatted terminal table, and generates `zerto_seeds_manifest.json`.
-* `02_vcf_seed_copy.py` — Selects all VPGs or a subset with Questionary, saves `zerto_migration_selection.json`, connects to vCenter via `pyVmomi`, creates standard seed folders, and executes server-side VMDK copies.
-* `03_vmdk_descriptor_cleanup.py` — Reads successfully copied disks from the migration selection, connects to vCenter, and comments out stale `ddb.iofilters` / `ddb.sidecars` references in each copied seed disk's descriptor file (see [Step 4](#step-4-clean-up-lingering-io-filter-references)).
-* `config.py` — Shared `.env` loader, required-variable validation, and the `[Datastore] VM_Name/VMDK` path logic shared by scripts 2 and 3.
+* `02_vcf_seed_copy.py` — Selects all VPGs or a subset with Questionary, saves `zerto_migration_selection.json`, cleans each confirmed original descriptor and verifies it before creating standard seed folders and executing server-side VMDK copies.
+* `descriptor_cleanup.py` — Validates source descriptor paths/content, comments stale `ddb.iofilters` / `ddb.sidecars` assignments, and verifies writes through authenticated vCenter datastore HTTP access.
+* `config.py` — Shared `.env` loader, required-variable validation, and `[Datastore] VM_Name/VMDK` path logic.
 * `migration_selection.py` — Shared selection validation and migration JSON persistence.
+* `requirements.txt` — Portable, hash-pinned export of `uv.lock`; installed through each laptop's permitted package index.
 * `journal_stats.py` — Offline VM/VPG journal aggregation and screening logic; `tests/` contains mocked unit tests.
 * `seed-assessment.md` — Interpretation, limitations, authentication options, and assessment output details.
 * `.env.example` — Template for the git-ignored `.env` file.
@@ -128,7 +168,7 @@ ZVM_CLIENT_SECRET=YourClientSecretHere
 
 2. Run the discovery script:
 ```bash
-uv run 01_zerto_discover_and_export.py
+uv run --no-sync 01_zerto_discover_and_export.py
 
 ```
 ![alt text](images/move-vmdk-01.png)
@@ -147,7 +187,7 @@ uv run 01_zerto_discover_and_export.py
 
 ```bash
 # Optional: use a 40% threshold and display MiB instead of GiB
-uv run 01_zerto_discover_and_export.py --threshold 40 --units MiB
+uv run --no-sync 01_zerto_discover_and_export.py --threshold 40 --units MiB
 ```
 
 4. Inspect `zerto_seed_assessment.json` and `zerto_seeds_manifest.json`.
@@ -157,7 +197,7 @@ uv run 01_zerto_discover_and_export.py --threshold 40 --units MiB
 
 ```bash
 # Optional: select VPGs now, without connecting to vCenter or copying
-uv run 02_vcf_seed_copy.py --select-only
+uv run --no-sync 02_vcf_seed_copy.py --select-only
 ```
 
 Choose **Keep all VPGs** or **Select a subset of VPGs**. In the checkbox list,
@@ -176,7 +216,7 @@ Before moving or copying replica files, ESXi file locks held by Zerto VRAs must 
 
 ![alt text](images/zerto-delete-vpg.png)
 
-### Step 3: Copy VMDKs to VCF Seed Directories
+### Step 3: Clean Original Descriptors and Copy VMDKs to VCF Seed Directories
 
 Examine your vSphere datastore to confirm current location of replica disks
 
@@ -195,26 +235,47 @@ VCENTER_DATACENTER=Datacenter-DR
 
 2. Execute the copy script to choose all VPGs or a subset and save the migration selection:
 ```bash
-uv run 02_vcf_seed_copy.py
+uv run --no-sync 02_vcf_seed_copy.py
 
 ```
 
 If you already saved a selection with `--select-only`, reuse it instead:
 
 ```bash
-uv run 02_vcf_seed_copy.py --reuse-selection
+uv run --no-sync 02_vcf_seed_copy.py --reuse-selection
 ```
 
-3. Confirm the prompt for each selected disk. The script creates the target `[Datastore] VM_Name` directory on vSAN/VMFS and initiates a `VirtualDiskManager` copy task.
+3. Confirm that selected workloads were unprotected using **Keep target disks** and
+   their locks released. This is an operator confirmation, not an automatic lock check.
+   The script warns that original descriptors will be modified without separate backups.
+4. Confirm each selected disk. The script reads its **original** descriptor, comments
+   stale `ddb.iofilters` / `ddb.sidecars` assignments, and reads back any write to verify
+   the exact content. Only then does it create `[Datastore] VM_Name` and initiate a
+   `VirtualDiskManager` copy task. Already-clean descriptors need no write.
 
-Copy results are saved after each disk. `--reuse-selection` skips completed disks
+Only disks in the Questionary selection (or its saved migration JSON) are eligible.
+Declined and already-copied disks are never cleaned. All disks in a selected VPG are
+included, subject to per-disk confirmation.
+
+Preview source edits and intended copies with no remote writes:
+
+```bash
+uv run --no-sync 02_vcf_seed_copy.py --reuse-selection --dry-run
+```
+
+Dry run still connects to vCenter and reads descriptors, but never uploads, creates
+folders, starts copy tasks, or updates saved results. Without `--reuse-selection`,
+it asks for a new selection and saves that selection locally. `--select-only`
+remains the offline selection mode and cannot be combined with `--dry-run`.
+
+Cleanup and copy results are saved per disk. `--reuse-selection` skips completed disks
 and offers pending, skipped, or failed disks again. A new selection asks before
-replacing an existing migration JSON. Use `--migration-file PATH` on both scripts,
+replacing an existing migration JSON. Use `--migration-file PATH` on script 2,
 or set `MIGRATION_FILE` in `.env`, to use a different selection file.
 
 ![alt text](images/move-vmdk-04.png)
 
-### Step 4: Clean Up Lingering I/O Filter References
+### Source Descriptor Cleanup Details
 
 If the original Zerto replica had an I/O filter attached (e.g. `hpereplication`), the
 copied seed disk's descriptor can retain `ddb.iofilters` / `ddb.sidecars` lines
@@ -255,30 +316,30 @@ ddb.virtualHWVersion = "14"
 
 ```
 
-Run Script 3 after Script 2 has finished copying. It reads the same migration JSON
-and only processes disks marked `copied`; pending, skipped, and failed disks are
-excluded. It does not fall back to the full discovery manifest if selection is missing:
+Cleanup is integrated into Script 2 **before copying**; there is no separate Script 3.
+It reuses the authenticated `pyVmomi` session for vCenter datastore HTTP access,
+targeting the actual source path, not the destination VM folder or display path.
+Only small UTF-8 text descriptors (up to 1 MiB) are accepted. Data extent paths,
+binary content, and malformed descriptors are rejected; HTTP requests have
+30-second timeouts. The large `-flat.vmdk` extent and vSAN data objects are never edited.
 
-```bash
-# Preview what would change, without writing anything
-uv run 03_vmdk_descriptor_cleanup.py --dry-run
+Matching assignments are commented out (`#ddb.iofilters = ...`), not deleted,
+per the KB's guidance. Existing comments, unrelated descriptor content, extent
+references, and LF/CRLF line endings are preserved. Re-running cleanup is idempotent.
+**No separate backup is made, and the original descriptor is no longer untouched.**
+If copying fails after cleanup, the source remains cleaned.
 
-# Apply, confirming each affected VM
-uv run 03_vmdk_descriptor_cleanup.py
+If fetching, validating, writing, or verifying a descriptor fails, Script 2 marks
+that disk `failed`, records `cleanup_status: failed` and `cleanup_error` in the
+migration JSON, does **not** copy it, and continues with other selected disks.
+Successful cleanup records `cleanup_status: cleaned` (or `clean` if no edit was needed)
+separately from `copy_status`. Retry with `--reuse-selection`; source descriptors
+are rechecked rather than trusting old cleanup results. Existing schema-version-1
+migration selections without cleanup metadata still work.
 
-# Apply without per-VM prompts
-uv run 03_vmdk_descriptor_cleanup.py --yes
-
-```
-
-The script reuses the same `VCENTER_*` variables as Script 2 and connects to
-vCenter's datastore HTTP file-access API (via the same `pyVmomi` session) to
-read and rewrite only the small text descriptor file — never the large
-`-flat.vmdk` data extent. Matching lines are commented out (`#ddb.iofilters = ...`),
-not deleted, per the KB's guidance, and the script is safe to re-run: VMs with
-no matching lines, or already-commented lines, are reported and left untouched.
-No separate backup is made, since Script 2 already copied the seed disk out from
-the original Zerto target disk.
+Disks already marked `copied` remain skipped, including copies made by older
+versions. They are not retroactively repaired by this workflow; inspect existing
+copies separately before using them as seeds.
 
 ---
 

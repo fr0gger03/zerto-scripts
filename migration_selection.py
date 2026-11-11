@@ -1,4 +1,4 @@
-"""Select complete VPGs and persist the shared copy/cleanup migration plan."""
+"""Select complete VPGs and persist source cleanup and copy results."""
 
 from datetime import datetime, timezone
 import json

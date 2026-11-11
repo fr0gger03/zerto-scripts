@@ -1,4 +1,4 @@
-"""Offline checks: uv run python -m unittest discover -s tests -v."""
+"""Offline checks: uv run --no-sync python -m unittest discover -s tests -v."""
 
 import importlib.util
 import io

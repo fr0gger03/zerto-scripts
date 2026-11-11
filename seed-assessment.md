@@ -43,7 +43,7 @@ protection relationships for the same VM.
 Each VM has a journal comprising one or more volumes. Recent writes and checkpoints
 remain there; older writes are promoted to recovery disks as history expires.
 Copying the base recovery VMDKs alone omits the newer writes still in the journal.
-Scripts 02–03 copy disks and clean descriptor references; they do not replay journals
+Script 02 cleans selected source descriptor references and copies disks; it does not replay journals
 or produce a current, recoverable VM image. vSphere Replication must reconcile seeds
 against the source.
 
@@ -94,10 +94,10 @@ excludes VPGs in script 02.
 ## Usage and authentication
 
 ```bash
-uv run 01_zerto_discover_and_export.py
-uv run 01_zerto_discover_and_export.py --threshold 40 --units MiB
-uv run 01_zerto_discover_and_export.py --show-volume-details --units MiB
-uv run 01_zerto_discover_and_export.py --auth-mode legacy --port 9669
+uv run --no-sync 01_zerto_discover_and_export.py
+uv run --no-sync 01_zerto_discover_and_export.py --threshold 40 --units MiB
+uv run --no-sync 01_zerto_discover_and_export.py --show-volume-details --units MiB
+uv run --no-sync 01_zerto_discover_and_export.py --auth-mode legacy --port 9669
 ```
 
 Appliances default to OAuth client credentials on port 443, retaining the existing
@@ -121,8 +121,8 @@ this change has offline tests, not certification against every Zerto release.
 ## Outputs and workflow
 
 - `zerto_seeds_manifest.json`: full discovery disk list, used as input by script 02.
-- `zerto_migration_selection.json`: selected VPGs/disks and per-disk copy status,
-  shared by scripts 02–03. `MIGRATION_FILE` or `--migration-file` sets its path.
+- `zerto_migration_selection.json`: selected VPGs/disks and per-disk source cleanup
+  and copy results saved by script 02. `MIGRATION_FILE` or `--migration-file` sets its path.
 - `zerto_seed_assessment.json`: raw byte totals, VM/VPG identifiers, ratios,
   journal ratio flags, data-quality issues, threshold, and UTC collection timestamps.
   Disk details are always exported, even without `--show-volume-details`.
@@ -151,10 +151,11 @@ menu to keep all VPGs or choose a subset. All disks in each chosen VPG are retai
 VPG identifiers are used when present, otherwise VPG names. With existing discovery
 files, VPG names must distinguish the groups you want to select.
 
-Use `uv run 02_vcf_seed_copy.py --select-only` to save the selection before
+Use `uv run --no-sync 02_vcf_seed_copy.py --select-only` to save the selection before
 unprotecting. Keep target disks for the chosen VPGs, then run script 02 with
-`--reuse-selection`. Script 03 reads the same migration JSON and only cleans disks
-marked `copied`. Selection does not delete VPGs or release Zerto locks.
+`--reuse-selection`. Script 02 cleans each confirmed original descriptor immediately
+before copying it. Unselected, declined, and already-copied disks are not edited.
+Selection does not delete VPGs or release Zerto locks.
 
 The migration JSON contains `schema_version`, `created_at`, `source_manifest`,
 `selected_vpgs`, and `disks`. Each disk keeps its discovery fields plus a
@@ -163,7 +164,12 @@ atomically after each disk. Reusing the file retries non-completed disks; it doe
 not overwrite existing destination VMDKs. If execution stops after a vCenter copy
 finishes but before its result is saved, verify the destination before retrying.
 A fresh selection resets copy statuses and asks before replacing the existing file.
-Keep this file for script 03, including when running cleanup with `--dry-run`.
+Source cleanup results are saved separately as `cleanup_status` (`clean`,
+`cleaned`, or `failed`) and `cleanup_error` on failure. Older migration files without
+these fields remain supported. Retries re-read the source even if previously cleaned.
+If cleanup fails, that disk is marked failed and not copied; other disks continue.
+No separate descriptor backup is made. Use script 02 with `--reuse-selection --dry-run`
+to preview source cleanup and copies without remote writes or saved result changes.
 See the [README](README.md#step-by-step-usage) for the complete sequence.
 
 ## Verification and references
@@ -171,7 +177,7 @@ See the [README](README.md#step-by-step-usage) for the complete sequence.
 Run offline tests without contacting Zerto or vCenter:
 
 ```bash
-uv run python -m unittest discover -s tests -v
+uv run --no-sync python -m unittest discover -s tests -v
 ```
 
 - [Zerto journal overview, sizing, and best practice](https://help.zerto.com/bundle/BP.Journal.Sizing.HTML/page/Journal_Overview_Sizing_and_Best_Practice.htm)

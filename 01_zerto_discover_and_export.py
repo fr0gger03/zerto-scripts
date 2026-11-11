@@ -298,7 +298,8 @@ def main():
     )
     console.print(
         f"Assessment saved to {assessment_path}. Review storage context before selecting or unprotecting any VPG.\n"
-        "For selected workloads only: keep target disks when unprotecting, then run scripts 02–03."
+        "For selected workloads only: keep target disks when unprotecting, then run script 02 "
+        "to clean source descriptors and copy seeds."
     )
 
 
