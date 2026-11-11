@@ -93,6 +93,11 @@ excludes VPGs in script 02.
 
 ## Usage and authentication
 
+Follow the [installation workflow](README.md#installation) first: sync the
+hash-pinned requirements through the laptop's permitted index, then run with
+`uv run --no-sync`. Script 01 requires Zerto access; vCenter operations belong
+to Script 02.
+
 ```bash
 uv run --no-sync 01_zerto_discover_and_export.py
 uv run --no-sync 01_zerto_discover_and_export.py --threshold 40 --units MiB
@@ -170,11 +175,19 @@ these fields remain supported. Retries re-read the source even if previously cle
 If cleanup fails, that disk is marked failed and not copied; other disks continue.
 No separate descriptor backup is made. Use script 02 with `--reuse-selection --dry-run`
 to preview source cleanup and copies without remote writes or saved result changes.
+Without reuse, dry run can save a new selection locally. `copied` means the
+vCenter copy task completed, not that a VM was powered on or that the seed includes
+the latest source writes. There is no separate post-copy cleanup step.
 See the [README](README.md#step-by-step-usage) for the complete sequence.
 
 ## Verification and references
 
 Run offline tests without contacting Zerto or vCenter:
+
+The full suite imports Script 02, including its required lowercase `pyvim.connect`
+import. If that import is unavailable, see the README's
+[connection import check](README.md#connection-import-check); do not change the
+casing required by the working deployment.
 
 ```bash
 uv run --no-sync python -m unittest discover -s tests -v

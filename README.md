@@ -4,6 +4,15 @@ This repository provides an automation workflow for converting active Zerto repl
 
 Copying Zerto target disks into standard datastore folders (`[Datastore] VM_Name/VMDK`) can reduce initial replication traffic. Script 01 reports journal and replica storage per VM and VPG to help evaluate whether seeds are worthwhile. See [journal assessment and decision guidance](seed-assessment.md).
 
+**Safety:** Script 02 modifies selected original descriptors before copying,
+without separate backups. Unprotect with **Keep target disks** and release locks
+first. These disks are replication seeds, not validated current recovery images;
+the scripts do not replay Zerto journals.
+
+After pulling dependency changes, sync `requirements.txt` through the laptop's
+permitted index, then use `uv run --no-sync`. There is no separate post-copy
+cleanup script.
+
 ---
 
 ## Architecture & Workflow Overview
@@ -32,10 +41,10 @@ Copying Zerto target disks into standard datastore folders (`[Datastore] VM_Name
 
 | Requirement | Details |
 | --- | --- |
-| **Python Engine** | Python 3.13+ (Managed via `uv` or standard `pip`) |
+| **Python Engine** | Python 3.13+ and `uv` for the documented installation workflow |
 | **Python Libraries** | `requests`, `pyvmomi`, `rich`, `python-dotenv`, `questionary` |
 | **Zerto Permissions** | ZVMA / ZVM Keycloak Client ID & Client Secret |
-| **vCenter Permissions** | Account with `Datastore.FileManagement` privileges |
+| **vCenter Permissions** | Account with `Datastore.FileManagement` and access to read/write source descriptors and create/copy destination files |
 
 ### Installation
 
@@ -95,6 +104,27 @@ requires the VPN; ordinary installs here do not.
 
 ---
 
+### Connection import check
+
+Script 02 uses **`from pyvim.connect import Disconnect, SmartConnect`**, with
+lowercase `pyvim`. This spelling is required by the user's working deployment;
+changing it to `pyVim.connect` breaks that deployment. The separate SDK type
+import is `from pyVmomi import vim`; the dependency distribution is `pyvmomi`.
+
+Check imports without contacting vCenter:
+
+```bash
+uv run --no-sync python -c 'from pyvim.connect import Disconnect, SmartConnect; from pyVmomi import vim'
+```
+
+If this reports `No module named 'pyvim'`, compare the installation with the
+working deployment. The public-PyPI pyVmomi 9.1.0.0 installation checked on the
+personal laptop exposes only `pyVim`, so this mismatch can occur even after a
+successful hash-checked install. It also blocks Script 02's `--help` and
+`--select-only` modes and the migration tests, which import the script.
+Do not install the unrelated `pyvim` package or silently change the repository's
+import casing as a workaround. The required spelling is recorded in `AGENTS.md`.
+
 ## Configuration
 
 All connection details and credentials are read from environment variables loaded
@@ -126,6 +156,15 @@ committed template containing placeholders only.
 | `MIGRATION_FILE` | Script 2 | Optional. Selected migration disks and cleanup/copy results (default `zerto_migration_selection.json`) |
 | `VERIFY_SSL` | Both | Optional. `true` to enforce TLS verification (default `false` for self-signed certs) |
 
+Prefer `VERIFY_SSL=true` with trusted Zerto and vCenter certificates; the current
+default is `false`. Only Script 01 requires Zerto credentials. Script 02 uses the
+`VCENTER_*` settings. Legacy Zerto authentication uses `ZVM_AUTH_MODE=legacy`,
+`ZVM_USER`, and `ZVM_PASSWORD` instead of OAuth credentials.
+
+`.env` is loaded relative to the repository; output file paths are relative to
+the working directory. Run these examples from the repository root and use the
+same `--migration-file PATH` for selection, preview, and execution.
+
 Environment variables exported in your shell (or injected by a secret manager
 such as `op run --env-file=.env -- uv run --no-sync ...`) take precedence over the `.env` file,
 so credentials never have to touch disk if you prefer.
@@ -150,8 +189,9 @@ Both scripts fail fast with a clear message listing every missing variable.
 
 ## Step-by-Step Usage
 
-### Prerequisite: Setup Zerto Keycloak client token
-See [keycloak.md](keycloak.md) for instructions.
+### Prerequisite: Configure Zerto authentication
+For the default OAuth mode, see [keycloak.md](keycloak.md). For legacy deployments,
+see [authentication modes](seed-assessment.md#usage-and-authentication).
 
 ### Step 1: Discover Zerto Replicas & Export Manifest
 
@@ -203,11 +243,12 @@ uv run --no-sync 02_vcf_seed_copy.py --select-only
 Choose **Keep all VPGs** or **Select a subset of VPGs**. In the checkbox list,
 use arrows to navigate, Space to toggle, and Enter to accept. All disks in each
 selected VPG are saved to `zerto_migration_selection.json`; discovery remains intact.
-Cancel with Ctrl+C to leave existing files unchanged.
+Cancel the Questionary selection with Ctrl+C to leave existing files unchanged.
+Once execution starts, interruption does not roll back source edits or completed copies.
 
 ### Step 2: Release File Locks in Zerto
 
-Before moving or copying replica files, ESXi file locks held by Zerto VRAs must be released:
+Before editing descriptors or copying replica files, ESXi file locks held by Zerto VRAs must be released:
 
 1. Open the **Zerto Management Interface**.
 2. Select only the VPG(s) chosen for migration and click **Delete VPG** (or remove specific VMs).
@@ -218,10 +259,8 @@ Before moving or copying replica files, ESXi file locks held by Zerto VRAs must 
 
 ### Step 3: Clean Original Descriptors and Copy VMDKs to VCF Seed Directories
 
-Examine your vSphere datastore to confirm current location of replica disks
-
-
-Run Script 2 after Zerto has released the file locks.
+Inspect the datastore to confirm that the original replica paths match the
+discovery manifest. Run Script 2 only after Zerto has released the file locks.
 
 1. Set your vCenter credentials in the same `.env` file:
 ```bash
@@ -273,6 +312,25 @@ and offers pending, skipped, or failed disks again. A new selection asks before
 replacing an existing migration JSON. Use `--migration-file PATH` on script 2,
 or set `MIGRATION_FILE` in `.env`, to use a different selection file.
 
+Keep the migration JSON until the migration is complete. It records `copy_status`
+as `pending`, `copied`, `skipped`, or `failed`, independently of source cleanup
+results. If interrupted after a copy finishes but before its result is saved,
+inspect the destination before retrying. Existing destination VMDKs are never
+overwritten (`force=False`).
+
+#### Script 02 mode reference
+
+| Options | Behavior |
+| --- | --- |
+| `--select-only` | Save selection locally; no vCenter connection or descriptor access |
+| No mode flag | Select VPGs, save selection, confirm lock release, then confirm each disk |
+| `--reuse-selection` | Load selection and offer disks not already marked `copied` |
+| `--reuse-selection --dry-run` | Preview saved pending work; no remote writes or saved result changes |
+| `--dry-run` without reuse | Save a new selection locally, then preview without remote writes |
+
+`--select-only` and `--reuse-selection` are mutually exclusive. `--select-only`
+cannot be combined with `--dry-run`. There is no unattended `--yes` mode.
+
 ![alt text](images/move-vmdk-04.png)
 
 ### Source Descriptor Cleanup Details
@@ -284,11 +342,9 @@ these can cause the eventual VM to fail to power on with an error like
 `Cannot open the disk '...' or one of the snapshot disks it depends on.`
 See [Broadcom KB 334555](https://knowledge.broadcom.com/external/article/334555/unable-to-power-on-vm-when-iofilters-is.html).
 
-``` bash
-# Example disk descriptor file containing references to hepreplicationfilter
+Example descriptor content (illustration, not a command to execute):
 
-cat /vmfs/volumes/consolidated-sandbox-cl01-ds-vsan01/ubuntu01-src.yellow.set.lab/ub
-untu01-src.yellow.set.lab.vmdk 
+```text
 
 # Disk DescriptorFile
 version=5
@@ -298,7 +354,7 @@ parentCID=ffffffff
 createType="vmfs"
 # Extent description
 RW 104857600 VMFS "vsan://522575f1cd03a467-4c173d347cbd724c/ce847f6a-aa67-4210-2c4d-0c42a1ed6c18"
-# The Disk Data Base 
+# The Disk Data Base
 #DDB
 ddb.adapterType = "buslogic"
 ddb.deletable = "true"
@@ -340,6 +396,35 @@ migration selections without cleanup metadata still work.
 Disks already marked `copied` remain skipped, including copies made by older
 versions. They are not retroactively repaired by this workflow; inspect existing
 copies separately before using them as seeds.
+
+---
+
+## Offline Validation and Troubleshooting
+
+Install dependencies and complete the [connection import check](#connection-import-check)
+before running:
+
+```bash
+uv run --no-sync python -m unittest discover -s tests -v
+uv run --no-sync python -m compileall -q config.py descriptor_cleanup.py migration_selection.py journal_stats.py 0*.py tests
+```
+
+Tests mock Zerto/vCenter access. Syntax compilation does not check import
+availability or prove compatibility with a live datastore.
+
+- **Artifactory/DNS error on the personal laptop:** install requirements through
+  public PyPI and use `uv run --no-sync`, not plain `uv run` or `uv sync`.
+- **Missing dependencies:** re-sync requirements through the laptop's permitted
+  index. `--no-sync` deliberately does not install or refresh packages.
+- **Missing `pyvim`:** see the import check above; preserve the lowercase import
+  required by the working deployment.
+- **Missing migration selection:** select first or pass the correct
+  `--migration-file`. Reuse never falls back to the full discovery manifest.
+- **Cleanup failure:** review `cleanup_error`, confirm source path/access and
+  released locks, then retry with `--reuse-selection`. A failed write does not
+  guarantee that the source remained unchanged.
+- **Copy failure or existing destination:** inspect the migration JSON and
+  datastore before retrying. Source cleanup is not rolled back.
 
 ---
 

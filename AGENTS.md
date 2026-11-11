@@ -42,6 +42,17 @@ requirements or rewrite the lock just to switch indexes.
 
 ## Coding Style & Naming Conventions
 
+**Required connection import:** Script 02 must use
+`from pyvim.connect import Disconnect, SmartConnect` (lowercase `pyvim`).
+The user has verified that changing it to `pyVim.connect` breaks their working
+deployment. Do not change this casing during refactoring or dependency cleanup.
+The separate SDK type import remains `from pyVmomi import vim`; the dependency
+distribution is `pyvmomi`, not the unrelated `pyvim` package.
+
+If another installation exposes only `pyVim`, report the environment mismatch
+instead of reversing this correction. Do not patch installed packages or inject
+test aliases to hide import failures. Syntax compilation does not validate imports.
+
 Use four-space indentation, `snake_case` functions and variables, and `UPPER_SNAKE_CASE` constants. Preserve numbered workflow filenames. Follow existing import grouping, add docstrings and type hints to reusable helpers, and centralize shared settings and path logic in `config.py`. Use Rich for terminal output. No formatter or linter is configured.
 
 ## Testing Guidelines
